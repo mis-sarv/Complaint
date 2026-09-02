@@ -57,8 +57,9 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 // ============================================================
 // 2. DOMAIN CONSTANTS  (must mirror the database CHECK constraints)
 // ============================================================
-const DEPARTMENTS = ["Knitting","Dyeing","Printing","Shearing","Embossing","Finishing",
-                     "Cutting & Stitching","Packing","Utility","Maintenance","Housekeeping","MIS","Other"];
+const DEPARTMENTS = ["RASCHEL","PRINTING","PRODUCTION","ADMIN","FINISHING","MAINTENANCE","GATE",
+                     "PACKING 2","GREY POLISH","MASTER","DISPATCH","HOUSE KEEPING","WASHING",
+                     "STORE","EMBOSSE","HR","PACKING 1","WARPING","Other"];
 const COMPLAINT_TYPES = ["Mechanical","Electrical","Housekeeping","Other"];
 const ROLES = ["User","Host","Admin","Maintenance"];
 const DOWN_TYPES = COMPLAINT_TYPES;   // every type now flags a machine "down" — Admin's call
@@ -128,6 +129,39 @@ function friendlyError(e){
   return m;
 }
 
+// Three short beeps via the Web Audio API — no audio file, no CDN, so it
+// works even if the factory network is down (purely client-side synthesis).
+// Sound is a nice-to-have: any failure here must never break the UI.
+function playAlarm(){
+  try{
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const beep = (t, freq) => {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = "square"; osc.frequency.value = freq;
+      osc.connect(gain); gain.connect(ctx.destination);
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime + t);
+      gain.gain.exponentialRampToValueAtTime(0.32, ctx.currentTime + t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t + 0.3);
+      osc.start(ctx.currentTime + t); osc.stop(ctx.currentTime + t + 0.32);
+    };
+    beep(0, 880); beep(0.36, 660); beep(0.72, 880);
+    setTimeout(()=>{ ctx.close?.().catch(()=>{}); }, 1400);
+  } catch(e){ /* ignore — sound is best-effort */ }
+}
+// Fire a native browser notification if the user already granted permission.
+// Requesting permission itself must happen from a real click (see BellButton) —
+// browsers ignore or auto-deny a silent/unsolicited request.
+function notifyBrowser(title, body, tag){
+  try{
+    if (window.Notification && Notification.permission === "granted") {
+      new Notification(title, { body, tag });
+    }
+  } catch(e){ /* ignore */ }
+  try{ if (navigator.vibrate) navigator.vibrate([300,150,300,150,300]); } catch(e){}
+}
+
 // ============================================================
 // 4. ICONS (inline SVG — no extra CDN, no post-render DOM scan)
 // ============================================================
@@ -158,6 +192,7 @@ const I = {
   send:'<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7Z"/>',
   calendar:'<rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M16 3v3M8 3v3M3 9.5h18"/>',
   trash:'<path d="M4 7h16"/><path d="M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/>',
+  bell:'<path d="M6 8a6 6 0 0 1 12 0c0 4.5 1.5 6 2 6.5H4c.5-.5 2-2 2-6.5Z"/><path d="M10 19a2 2 0 0 0 4 0"/>',
 };
 
 // ============================================================
@@ -204,7 +239,7 @@ const inputCls = (bad) =>
   "w-full rounded-lg bg-white border px-3 py-2 text-sm text-slate-900 placeholder-slate-400 " +
   "focus:outline-none focus:ring-2 focus:ring-teal-500/60 " + (bad ? "border-rose-500" : "border-slate-300");
 
-function Badge({tone="slate", children}){
+function Badge({tone="slate", children, ...rest}){
   const tones = {
     slate:"bg-slate-100 text-slate-700",
     amber:"bg-amber-500/15 text-amber-700",
@@ -213,7 +248,7 @@ function Badge({tone="slate", children}){
     rose:"bg-rose-500/15 text-rose-700",
     violet:"bg-violet-500/15 text-violet-700",
   };
-  return <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${tones[tone]}`}>{children}</span>;
+  return <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${tones[tone]}`} {...rest}>{children}</span>;
 }
 function StatusBadge({c}){
   if (c.status === "Pending")     return <Badge tone={isDown(c)?"rose":"amber"}>{isDown(c)?"Pending · DOWN":"Pending"}</Badge>;
@@ -866,7 +901,7 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
       {/* ---------- HOST ACTION PANEL ---------- */}
       {canHostAct && c.status === "Pending" && (
         <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-4 mt-5">
-          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">Start work / काम शुरू करें</p>
+          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">By when will the work be finished? / काम कब तक हो जाएगा?</p>
           <Field label="Completion date &amp; time" hindi="कब तक ठीक होगा" required
                  hint="Yeh time user ko In-progress tab me dikhega.">
             <input type="datetime-local" className={inputCls(false)} value={eta} onChange={e=>setEta(e.target.value)} />
@@ -1085,9 +1120,11 @@ function ComplaintsView({profile, rows, loading, onRefresh, onOpen, toast}){
 // ============================================================
 function UserFormModal({editing, onClose, onSaved, toast, callAdmin}){
   const isEdit = !!editing;
+  const knownDept = editing?.department && DEPARTMENTS.includes(editing.department);
   const [f, setF] = useState({
     name: editing?.name || "", mobile: editing?.mobile || "",
-    department: editing?.department || DEPARTMENTS[0],
+    department: knownDept ? editing.department : (editing?.department ? "Other" : DEPARTMENTS[0]),
+    department_other: (editing?.department && !knownDept) ? editing.department : "",
     designation: editing?.designation || "",
     dob: editing?.dob || "", role: editing?.role || "User",
     host_types: editing?.host_types || [],
@@ -1111,16 +1148,18 @@ function UserFormModal({editing, onClose, onSaved, toast, callAdmin}){
     if (!/^\d{10}$/.test(digits(f.mobile))) e.mobile = "Exactly 10 digit ka mobile number.";
     if (!f.designation.trim()) e.designation = "Designation likhein.";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(f.dob)) e.dob = "Janm tithi chunein.";
+    if (f.department === "Other" && !f.department_other.trim()) e.department_other = "Naya department ka naam likhein.";
     if (f.role === "Host" && f.host_types.length === 0) e.host_types = "Host ko kam se kam ek complaint type dein.";
     setErrs(e);
     if (Object.keys(e).length) return;
 
+    const finalDept = f.department === "Other" ? f.department_other.trim() : f.department;
     setBusy(true);
     const payload = {
       action: isEdit ? "update" : "create",
       id: editing?.id,
       name: f.name.trim(), mobile: digits(f.mobile),
-      department: f.department, designation: f.designation.trim(),
+      department: finalDept, designation: f.designation.trim(),
       dob: f.dob, role: f.role,
       host_types: f.role === "Host" ? f.host_types : [],
     };
@@ -1177,6 +1216,12 @@ function UserFormModal({editing, onClose, onSaved, toast, callAdmin}){
             {DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}
           </select>
         </Field>
+        {f.department === "Other" && (
+          <Field label="New department name" hindi="नया विभाग का नाम" required error={errs.department_other}>
+            <input className={inputCls(errs.department_other)} value={f.department_other}
+                   onChange={e=>set("department_other", e.target.value)} placeholder="e.g. QUALITY CHECK" />
+          </Field>
+        )}
         <Field label="Designation" hindi="पद" required error={errs.designation}>
           <input className={inputCls(errs.designation)} value={f.designation}
                  onChange={e=>set("designation", e.target.value)} placeholder="Machine Operator" />
@@ -1373,10 +1418,12 @@ function AdminUsers({profile, toast, callAdmin}){
 // ============================================================
 function MachineFormModal({editing, onClose, onSaved, toast}){
   const isEdit = !!editing;
+  const knownDept = editing?.department && DEPARTMENTS.includes(editing.department);
   const [f, setF] = useState({
     machine_name: editing?.machine_name || "",
     machine_no: editing?.machine_no || "",
-    department: editing?.department || DEPARTMENTS[0],
+    department: knownDept ? editing.department : (editing?.department ? "Other" : DEPARTMENTS[0]),
+    department_other: (editing?.department && !knownDept) ? editing.department : "",
   });
   const [errs, setErrs] = useState({});
   const [busy, setBusy] = useState(false);
@@ -1386,11 +1433,13 @@ function MachineFormModal({editing, onClose, onSaved, toast}){
     const e = {};
     if (!f.machine_name.trim()) e.machine_name = "Machine ka naam likhein.";
     if (!f.machine_no.trim()) e.machine_no = "Machine number likhein.";
+    if (f.department === "Other" && !f.department_other.trim()) e.department_other = "Naya department ka naam likhein.";
     setErrs(e);
     if (Object.keys(e).length) return;
 
+    const finalDept = f.department === "Other" ? f.department_other.trim() : f.department;
     setBusy(true);
-    const row = { machine_name: f.machine_name.trim(), machine_no: f.machine_no.trim(), department: f.department };
+    const row = { machine_name: f.machine_name.trim(), machine_no: f.machine_no.trim(), department: finalDept };
     const { error } = isEdit
       ? await sb.from("machine_list").update(row).eq("id", editing.id)
       : await sb.from("machine_list").insert(row);
@@ -1420,6 +1469,12 @@ function MachineFormModal({editing, onClose, onSaved, toast}){
           {DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}
         </select>
       </Field>
+      {f.department === "Other" && (
+        <Field label="New department name" hindi="नया विभाग का नाम" required error={errs.department_other}>
+          <input className={inputCls(errs.department_other)} value={f.department_other}
+                 onChange={e=>set("department_other", e.target.value)} placeholder="e.g. QUALITY CHECK" />
+        </Field>
+      )}
     </Modal>
   );
 }
@@ -1559,12 +1614,17 @@ function NoticeAttachment({post, onView}){
   return null;
 }
 
-function NoticeComposer({profile, toast}){
+function NoticeComposer({profile, users, toast}){
+  const isAdmin = profile.role === "Admin";
   const [msg, setMsg] = useState("");
   const [att, setAtt] = useState(null);   // {data, mime, name}
   const [imgBusy, setImgBusy] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [audience, setAudience] = useState("all");   // "all" | "selected"
+  const [picked, setPicked] = useState([]);          // user ids
   const imgRef = useRef(null), pdfRef = useRef(null);
+
+  const togglePick = (id) => setPicked(p => p.includes(id) ? p.filter(x=>x!==id) : [...p, id]);
 
   const pickImage = async (file) => {
     if (!file) return;
@@ -1586,17 +1646,20 @@ function NoticeComposer({profile, toast}){
 
   const post = async () => {
     if (!msg.trim() && !att) return toast("Kuch likhein ya photo/PDF lagayein.", true);
+    if (isAdmin && audience === "selected" && picked.length === 0)
+      return toast("Kam se kam ek user select karein, ya \"Sabko\" chunein.", true);
     setBusy(true);
     const { error } = await sb.from("notice_board").insert({
       message: msg.trim() || null,
       attachment_data: att?.data || null,
       attachment_mime: att?.mime || null,
       attachment_name: att?.name || null,
+      recipient_ids: (isAdmin && audience === "selected") ? picked : null,
     });
     setBusy(false);
     if (error) return toast(friendlyError(error), true);
-    setMsg(""); setAtt(null);
-    // No manual refresh — the Realtime INSERT event appends it for everyone, this client included.
+    setMsg(""); setAtt(null); setAudience("all"); setPicked([]);
+    // No manual refresh — the Realtime INSERT event appends it for everyone the DB lets see it.
   };
 
   return (
@@ -1628,6 +1691,37 @@ function NoticeComposer({profile, toast}){
           )}
         </div>
       )}
+
+      {isAdmin && (
+        <div className="ml-12 mt-2.5">
+          <div className="flex items-center gap-1.5 mb-2">
+            <button type="button" onClick={()=>setAudience("all")}
+              className={`rounded-full px-3 py-1 text-[11.5px] font-medium border ${
+                audience==="all" ? "bg-teal-500 border-teal-500 text-slate-950" : "bg-white border-slate-300 text-slate-500 hover:border-slate-400"}`}>
+              Sabko
+            </button>
+            <button type="button" onClick={()=>setAudience("selected")}
+              className={`rounded-full px-3 py-1 text-[11.5px] font-medium border ${
+                audience==="selected" ? "bg-teal-500 border-teal-500 text-slate-950" : "bg-white border-slate-300 text-slate-500 hover:border-slate-400"}`}>
+              Specific users{picked.length>0 ? ` (${picked.length})` : ""}
+            </button>
+          </div>
+          {audience === "selected" && (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 max-h-40 overflow-y-auto p-1.5 mb-1">
+              {users.length === 0 ? (
+                <p className="text-[12px] text-slate-500 px-2 py-1.5">Koi user nahi mila.</p>
+              ) : users.map(u => (
+                <label key={u.id} className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white cursor-pointer text-[12.5px]">
+                  <input type="checkbox" checked={picked.includes(u.id)} onChange={()=>togglePick(u.id)} className="accent-teal-500" />
+                  <span className="truncate">{u.name}</span>
+                  <span className="text-slate-400 truncate ml-auto text-[11px]">{u.department}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex items-center gap-2 mt-2.5 ml-12 flex-wrap">
         <Btn size="sm" variant="outline" icon={I.camera} type="button" disabled={!!att || imgBusy} onClick={()=>imgRef.current?.click()}>
           {imgBusy ? "Adding…" : "Photo"}
@@ -1643,9 +1737,14 @@ function NoticeComposer({profile, toast}){
   );
 }
 
-function NoticeCard({post, profile, toast, onView}){
+function NoticeCard({post, profile, users, toast, onView}){
   const isAdmin = profile.role === "Admin";
   const isOwner = post.created_by === profile.id;
+  const recipientNames = useMemo(()=>{
+    if (!post.recipient_ids?.length) return null;
+    const byId = Object.fromEntries(users.map(u=>[u.id,u.name]));
+    return post.recipient_ids.map(id => byId[id] || "…").join(", ");
+  },[post.recipient_ids, users]);
   const [busy, setBusy] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
@@ -1676,6 +1775,11 @@ function NoticeCard({post, profile, toast, onView}){
           <div className="flex items-center gap-2 flex-wrap">
             <p className="font-semibold text-[13.5px] truncate">{post.created_by_name}</p>
             <Badge tone={roleTone(post.created_by_role)}>{post.created_by_role}</Badge>
+            {post.recipient_ids?.length ? (
+              <Badge tone="violet" title={isAdmin ? recipientNames : undefined}>
+                {isAdmin ? `Sirf: ${recipientNames}` : "Sirf aapke liye"}
+              </Badge>
+            ) : null}
             <span className="ml-auto text-[11px] text-slate-500 font-mono shrink-0">{fmtDateTime(post.created_at)}</span>
           </div>
           {post.message ? <p className="text-[13.5px] text-slate-800 whitespace-pre-wrap mt-1.5 leading-relaxed">{post.message}</p> : null}
@@ -1721,6 +1825,7 @@ function NoticeCard({post, profile, toast, onView}){
 function NoticeBoard({profile, toast, onView}){
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [users, setUsers] = useState([]);   // for the Admin's "specific users" picker + name badges
 
   const load = useCallback(async ()=>{
     setLoading(true);
@@ -1730,6 +1835,12 @@ function NoticeBoard({profile, toast, onView}){
     setPosts(data || []);
   },[toast]);
   useEffect(()=>{ load(); },[load]);
+
+  useEffect(()=>{
+    if (profile.role !== "Admin") return;   // only Admin can target — no need elsewhere
+    sb.from("profiles").select("id,name,department").eq("is_active", true).order("name")
+      .then(({data}) => setUsers(data || []));
+  },[profile.role]);
 
   // Live updates for everyone looking at the board — no polling, no manual refresh.
   useEffect(()=>{
@@ -1753,10 +1864,10 @@ function NoticeBoard({profile, toast, onView}){
     <div>
       <div className="mb-4">
         <h2 className="font-bold text-[17px]">Notice Board</h2>
-        <p className="text-[12.5px] text-slate-500">सूचना पट्ट &mdash; sabko dikhega, real-time</p>
+        <p className="text-[12.5px] text-slate-500">सूचना पट्ट &mdash; real-time{profile.role==="Admin" ? " · Admin sabko ya specific users ko bhej sakta hai" : ""}</p>
       </div>
 
-      <NoticeComposer profile={profile} toast={toast} />
+      <NoticeComposer profile={profile} users={users} toast={toast} />
 
       {loading ? (
         <div className="space-y-3">
@@ -1774,7 +1885,7 @@ function NoticeBoard({profile, toast, onView}){
         </div>
       ) : (
         <div className="space-y-3">
-          {posts.map(p => <NoticeCard key={p.id} post={p} profile={profile} toast={toast} onView={onView} />)}
+          {posts.map(p => <NoticeCard key={p.id} post={p} profile={profile} users={users} toast={toast} onView={onView} />)}
         </div>
       )}
     </div>
@@ -1934,7 +2045,10 @@ function TaskRow({t, onOpen}){
         <p className="text-[10.5px] uppercase tracking-wide text-slate-500">Planned</p>
         <p className="text-[12.5px] font-semibold text-slate-800">{fmtDate(t.planned_date)}</p>
       </div>
-      <div className="shrink-0"><TaskStatusBadge t={t} /></div>
+      <div className="shrink-0 flex items-center gap-1.5">
+        {t.date_change_requested && <Badge tone="amber">Change req.</Badge>}
+        <TaskStatusBadge t={t} />
+      </div>
     </button>
   );
 }
@@ -1946,10 +2060,16 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [newDate, setNewDate] = useState(t.planned_date);
+  const [dateRemark, setDateRemark] = useState("");
+  const [doerMode, setDoerMode] = useState(null); // null | "confirm" | "change"
+  const [doerRemark, setDoerRemark] = useState("");
   const [note, setNote] = useState("");
   const [proof, setProof] = useState(null);
   const [confirmDel, setConfirmDel] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
+  const [ringMsg, setRingMsg] = useState("");
+  const [ringBusy, setRingBusy] = useState(false);
+  const [ringSent, setRingSent] = useState(false);
 
   const run = async (patch, msg) => {
     setBusy(true); setErr("");
@@ -1962,10 +2082,14 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
   const updateDate = () => {
     if (!newDate) return setErr("Date chunein.");
     if (newDate === t.planned_date) return onClose();
-    run({ planned_date:newDate },
+    run({ planned_date:newDate, date_remarks: dateRemark.trim() || null },
       t.status === "Pending Confirmation" ? "Planned date update ho gayi." : `Planned date revise ho gayi (${t.revision_count+1}/3).`);
   };
-  const confirmDate = () => run({ status:"Assigned" }, "Task confirm ho gayi — ab yeh assigned hai.");
+  const confirmDate = () => run({ status:"Assigned", doer_remarks: doerRemark.trim() || null }, "Task confirm ho gayi — ab yeh assigned hai.");
+  const requestChange = () => {
+    if (!doerRemark.trim()) return setErr("Date change ki wajah likhein.");
+    run({ doer_remarks: doerRemark.trim() }, "Admin ko date change ki request bhej di.");
+  };
   const markDone = () => {
     if (!proof) return setErr("Photo ya document lagana zaroori hai.");
     run({ status:"Completed", proof_data:proof.data, proof_mime:proof.mime, proof_name:proof.name, completion_note: note.trim() || null },
@@ -1977,6 +2101,15 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
     setDelBusy(false); setConfirmDel(false);
     if (error) return toast(friendlyError(error), true);
     toast("Task delete ho gayi."); onSaved(); onClose();
+  };
+  const ringAlarm = async () => {
+    setRingBusy(true); setErr("");
+    const { error } = await sb.from("task_reminders").insert({ task_id: t.id, message: ringMsg.trim() || null });
+    setRingBusy(false);
+    if (error) return setErr(friendlyError(error));
+    setRingMsg(""); setRingSent(true);
+    toast("Reminder bhej diya.");
+    setTimeout(()=>setRingSent(false), 4000);
   };
 
   const Row = ({k, v}) => (
@@ -1992,6 +2125,7 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
       <div className="flex items-center gap-2 flex-wrap mb-4">
         <TaskStatusBadge t={t} />
         {t.first_planned_date !== t.planned_date && <Badge tone="slate">First date: {fmtDate(t.first_planned_date)}</Badge>}
+        {t.date_change_requested && <Badge tone="amber">Doer ne date change maangi hai</Badge>}
       </div>
 
       <div className="grid grid-cols-2 gap-4 mb-4">
@@ -2009,12 +2143,43 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
           <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-1.5">Revision history</p>
           <div className="rounded-xl border border-slate-200 divide-y divide-slate-200">
             {t.revision_history.map((r,i)=>(
-              <div key={i} className="flex items-center gap-2.5 px-3.5 py-2 text-[12.5px]">
-                <Ico d={I.refresh} className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <span className="text-slate-500">{fmtDate(r.old_date)} → <span className="text-slate-800 font-semibold">{fmtDate(r.new_date)}</span></span>
-                <span className="ml-auto text-slate-400">{r.revised_by} · {fmtDateTime(r.revised_at)}</span>
+              <div key={i} className="px-3.5 py-2 text-[12.5px]">
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  {r.event === "confirmed" ? (
+                    <><Ico d={I.check} className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                      <span className="text-slate-700 font-semibold">Confirmed {fmtDate(r.date)}</span></>
+                  ) : r.event === "change_requested" ? (
+                    <><Ico d={I.alert} className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                      <span className="text-slate-700 font-semibold">Date change maangi (tha {fmtDate(r.date)})</span></>
+                  ) : (
+                    <><Ico d={I.refresh} className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span className="text-slate-500">{fmtDate(r.old_date)} → <span className="text-slate-800 font-semibold">{fmtDate(r.new_date)}</span></span>
+                      {r.stage === "Pending Confirmation" && <Badge tone="slate">Pre-confirm</Badge>}</>
+                  )}
+                  <span className="ml-auto text-slate-400 shrink-0">{r.revised_by} · {fmtDateTime(r.revised_at)}</span>
+                </div>
+                {r.remarks ? <p className="text-slate-600 mt-1 pl-6 whitespace-pre-wrap">"{r.remarks}"</p> : null}
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {isAdmin && t.status !== "Completed" && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 mb-4">
+          <p className="text-[11px] uppercase tracking-wide text-amber-700 font-semibold mb-2 flex items-center gap-1.5">
+            <Ico d={I.bell} className="w-3.5 h-3.5" /> Ring alarm — doer ke device par
+          </p>
+          <p className="text-[12px] text-slate-500 mb-2.5">
+            Doer ka app khula hona chahiye (background tab bhi chalega) — turant sound + alert dikhega.
+            Band app ya band phone par nahi jaayega, kyunki yeh ek plain web app hai (koi push server nahi).
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <input className={inputCls(false)+" flex-1 min-w-[160px]"} value={ringMsg}
+                   onChange={e=>setRingMsg(e.target.value)} placeholder="Message (optional)…" />
+            <Btn size="sm" variant="primary" icon={I.bell} onClick={ringAlarm} disabled={ringBusy}>
+              {ringBusy?<Spinner/>:null}{ringSent ? "Bhej diya ✓" : "Ring alarm"}
+            </Btn>
           </div>
         </div>
       )}
@@ -2043,20 +2208,53 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
           {t.status === "Assigned" && t.revision_count >= 3 ? (
             <p className="text-[13px] text-rose-600">Revision limit (3/3) khatam ho chuki hai — ab date badal nahi sakte.</p>
           ) : (
-            <div className="flex items-center gap-2 flex-wrap">
-              <input type="date" className={inputCls(false)+" w-auto"} value={newDate} min={todayStr()} onChange={e=>setNewDate(e.target.value)} />
-              <Btn size="sm" variant="primary" onClick={updateDate} disabled={busy}>{busy?<Spinner/>:null}Save date</Btn>
-            </div>
+            <>
+              <div className="flex items-center gap-2 flex-wrap mb-2.5">
+                <input type="date" className={inputCls(false)+" w-auto"} value={newDate} min={todayStr()} onChange={e=>setNewDate(e.target.value)} />
+                <Btn size="sm" variant="primary" onClick={updateDate} disabled={busy}>{busy?<Spinner/>:null}Save date</Btn>
+              </div>
+              <textarea className={inputCls(false)+" min-h-[52px] resize-y"} value={dateRemark}
+                        onChange={e=>setDateRemark(e.target.value)} placeholder="Date badalne ki wajah (optional) — remarks…" />
+            </>
           )}
         </div>
       )}
 
-      {/* ---------- DOER: confirm the date ---------- */}
+      {/* ---------- DOER: confirm the date, or ask admin to change it ---------- */}
       {isDoer && t.status === "Pending Confirmation" && (
         <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4 mb-4">
           <p className="text-[13px] font-semibold text-violet-800 mb-1">Is planned date ko confirm karein?</p>
           <p className="text-[12.5px] text-slate-500 mb-3">Confirm karne ke baad hi yeh task aapko assign maani jayegi.</p>
-          <Btn variant="ok" icon={I.check} onClick={confirmDate} disabled={busy}>{busy?<Spinner/>:null}Confirm {fmtDate(t.planned_date)}</Btn>
+
+          {doerMode === null && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Btn variant="ok" icon={I.check} onClick={()=>setDoerMode("confirm")}>Confirm {fmtDate(t.planned_date)}</Btn>
+              <Btn variant="outline" icon={I.calendar} onClick={()=>setDoerMode("change")}>Date change chahiye</Btn>
+            </div>
+          )}
+
+          {doerMode === "confirm" && (
+            <>
+              <textarea className={inputCls(false)+" min-h-[52px] resize-y mb-2.5"} value={doerRemark}
+                        onChange={e=>setDoerRemark(e.target.value)} placeholder="Remark (optional)…" />
+              <div className="flex items-center gap-2 flex-wrap">
+                <Btn variant="ok" icon={I.check} onClick={confirmDate} disabled={busy}>{busy?<Spinner/>:null}Confirm {fmtDate(t.planned_date)}</Btn>
+                <Btn variant="outline" onClick={()=>{setDoerMode(null); setDoerRemark("");}} disabled={busy}>Wapas</Btn>
+              </div>
+            </>
+          )}
+
+          {doerMode === "change" && (
+            <>
+              <p className="text-[12px] text-slate-500 mb-2">Date aap khud nahi badal sakte — Admin ko wajah bata dein, wahi date revise karega.</p>
+              <textarea className={inputCls(false)+" min-h-[52px] resize-y mb-2.5"} value={doerRemark}
+                        onChange={e=>setDoerRemark(e.target.value)} placeholder="Date change ki wajah likhein… (zaroori)" />
+              <div className="flex items-center gap-2 flex-wrap">
+                <Btn variant="primary" icon={I.alert} onClick={requestChange} disabled={busy}>{busy?<Spinner/>:null}Request bhejein</Btn>
+                <Btn variant="outline" onClick={()=>{setDoerMode(null); setDoerRemark("");}} disabled={busy}>Wapas</Btn>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -2287,6 +2485,85 @@ function Stats({rows, profile}){
 }
 
 // ============================================================
+// 13B. TASK REMINDERS — Admin "ring alarm" pings a doer's device live.
+//      Sound + browser Notification only fire while this tab is open
+//      (a plain browser app can't wake a fully-closed device — see the
+//      note this ships with); acknowledging is mandatory so a missed
+//      alarm doesn't silently vanish.
+// ============================================================
+function BellButton({toast}){
+  const [perm, setPerm] = useState(()=> (window.Notification ? Notification.permission : "unsupported"));
+  if (perm === "unsupported" || perm === "granted") return null;
+  const ask = async () => {
+    try{
+      const p = await Notification.requestPermission();
+      setPerm(p);
+      toast(p === "granted" ? "Reminder alerts on ho gaye." : "Alerts allow nahi hue — sirf in-app alarm bajega.");
+    } catch(e){ toast("Yeh browser notifications support nahi karta.", true); }
+  };
+  return (
+    <Btn variant="ghost" icon={I.bell} onClick={ask} className="shrink-0" title="Reminder alerts on karein">
+      <span className="hidden sm:inline">Alerts</span>
+    </Btn>
+  );
+}
+
+function ReminderWatcher({profile}){
+  const [queue, setQueue] = useState([]);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(()=>{
+    if (!profile?.id) return;
+    const channel = sb.channel(`task_reminders_${profile.id}`)
+      .on("postgres_changes",
+        {event:"INSERT", schema:"public", table:"task_reminders", filter:`assigned_to=eq.${profile.id}`},
+        payload => {
+          setQueue(q => q.some(x=>x.id===payload.new.id) ? q : [...q, payload.new]);
+          playAlarm();
+          notifyBrowser("⏰ Task Reminder", payload.new.task_desc_snapshot, `task-${payload.new.task_id}`);
+        })
+      .subscribe();
+    return ()=>{ sb.removeChannel(channel); };
+  },[profile?.id]);
+
+  if (!queue.length) return null;
+  const r = queue[0];
+
+  const ack = async () => {
+    setBusy(true);
+    const { error } = await sb.from("task_reminders").update({ acknowledged_at: new Date().toISOString() }).eq("id", r.id);
+    setBusy(false);
+    // Whether it saved or not, don't trap the operator behind a dead alarm —
+    // drop it from the local queue either way; worst case it's still marked
+    // unacknowledged in the DB for the Admin to see.
+    setQueue(q => q.filter(x=>x.id!==r.id));
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border-2 border-amber-400">
+        <div className="flex items-center gap-2 mb-2.5">
+          <div className="w-9 h-9 rounded-full bg-amber-500/15 text-amber-600 grid place-items-center shrink-0">
+            <Ico d={I.bell} className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="font-bold text-[15.5px] text-slate-900">Task Reminder</h3>
+            <p className="text-[11px] text-slate-500">{r.sent_by_name} · {fmtDateTime(r.sent_at)}</p>
+          </div>
+        </div>
+        <p className="text-[13.5px] text-slate-800 whitespace-pre-wrap leading-relaxed mb-1.5">{r.task_desc_snapshot}</p>
+        <p className="text-[12px] text-slate-500 mb-2">Planned date: {fmtDate(r.planned_date_snapshot)}</p>
+        {r.message ? <p className="text-[13px] text-teal-800 bg-teal-500/10 rounded-lg px-3 py-2 italic whitespace-pre-wrap mb-2">"{r.message}"</p> : null}
+        {queue.length > 1 ? <p className="text-[11.5px] text-slate-400 mb-2">+{queue.length-1} aur reminder baaki</p> : null}
+        <Btn variant="primary" className="w-full justify-center mt-2" onClick={ack} disabled={busy}>
+          {busy?<Spinner/>:null}OK, dekh liya
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // 14. APP
 // ============================================================
 function App(){
@@ -2441,6 +2718,7 @@ function App(){
           <Btn variant="primary" icon={I.plus} onClick={()=>setShowNew(true)} className="shrink-0">
             <span className="hidden sm:inline">New Complaint</span><span className="sm:hidden">New</span>
           </Btn>
+          <BellButton toast={toast} />
           <Btn variant="ghost" icon={I.logout} onClick={()=>sb.auth.signOut()} aria-label="Logout" className="shrink-0" />
         </div>
       </header>
@@ -2472,6 +2750,7 @@ function App(){
           onClose={()=>setDetail(null)} onSaved={()=>{ setDetail(null); loadRows(false); }} />
       )}
       {lightbox && <Lightbox src={lightbox} onClose={()=>setLightbox(null)} />}
+      <ReminderWatcher profile={profile} />
       <Toasts items={toasts} dismiss={dismiss} />
     </div>
   );
