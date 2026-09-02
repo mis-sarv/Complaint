@@ -496,13 +496,30 @@ function Lightbox({src, onClose}){
 // 8. LOGIN
 // ============================================================
 function LoginScreen({toast}){
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+
+  // ---- Login state ----
   const [name, setName] = useState("");
   const [pwd, setPwd] = useState("");
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const submit = async (e) => {
+  // ---- Signup state ----
+  const [sf, setSf] = useState({
+    name:"", mobile:"", department:DEPARTMENTS[0], department_other:"",
+    designation:"", dob:""
+  });
+  const [sErrs, setSErrs] = useState({});
+  const [sBusy, setSBusy] = useState(false);
+  const [sErr, setSErr] = useState("");
+  const [signupDone, setSignupDone] = useState(false);
+  const sSet = (k,v) => setSf(prev=>({...prev,[k]:v}));
+
+  const sPreviewPwd = useMemo(()=> makePassword(digits(sf.mobile), sf.dob), [sf.mobile, sf.dob]);
+
+  // ---- Login handler ----
+  const submitLogin = async (e) => {
     e.preventDefault();
     setErr("");
     if (!name.trim()) return setErr("Apna naam likhein.");
@@ -511,8 +528,85 @@ function LoginScreen({toast}){
     const { error } = await sb.auth.signInWithPassword({ email: makeEmail(name), password: pwd });
     setBusy(false);
     if (error) setErr(friendlyError(error));
-    // Success is handled by the onAuthStateChange listener in App.
   };
+
+  // ---- Signup handler ----
+  const submitSignup = async (e) => {
+    e.preventDefault();
+    const errs = {};
+    if (sf.name.trim().length < 2) errs.name = "Poora naam likhein (kam se kam 2 akshar).";
+    if (!/^\d{10}$/.test(digits(sf.mobile))) errs.mobile = "Exactly 10 digit ka mobile number.";
+    if (sf.department === "Other" && !sf.department_other.trim()) errs.department_other = "Naya department ka naam likhein.";
+    if (!sf.designation.trim()) errs.designation = "Designation likhein.";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(sf.dob)) errs.dob = "Janm tithi chunein.";
+    setSErrs(errs);
+    if (Object.keys(errs).length) return;
+
+    const finalDept = sf.department === "Other" ? sf.department_other.trim() : sf.department;
+    const mob = digits(sf.mobile);
+    const password = makePassword(mob, sf.dob);
+    const email = makeEmail(sf.name);
+
+    setSBusy(true); setSErr("");
+    const { data, error } = await sb.auth.signUp({
+      email, password,
+      options: { data: {
+        self_signup: "true",
+        name: sf.name.trim(),
+        mobile: mob,
+        department: finalDept,
+        designation: sf.designation.trim(),
+        dob: sf.dob
+      }}
+    });
+    setSBusy(false);
+
+    if (error) {
+      const msg = (error.message || "").toLowerCase();
+      if (msg.includes("mobile_taken") || msg.includes("mobile")) {
+        setSErr("Yeh mobile number pehle se registered hai. Doosra number use karein ya login karein.");
+      } else if (msg.includes("name_taken") || msg.includes("username") || msg.includes("already registered")) {
+        setSErr("Yeh naam pehle se registered hai. Apna poora naam likhein (middle name bhi) ya login karein.");
+      } else {
+        setSErr(friendlyError(error));
+      }
+      return;
+    }
+
+    // If no session (email confirmation required) — show success message
+    if (!data.session) {
+      setSignupDone(true);
+      return;
+    }
+    // Session exists → onAuthStateChange handles auto-login
+    toast("Account ban gaya! Welcome!");
+  };
+
+  // ---- Signup success (no auto-session) ----
+  if (signupDone) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-5">
+        <div className="w-full max-w-sm text-center">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 text-emerald-600 grid place-items-center mx-auto mb-4">
+            <Ico d={I.check} className="w-7 h-7" />
+          </div>
+          <h2 className="font-bold text-lg mb-2">Account ban gaya!</h2>
+          <p className="text-sm text-slate-600 mb-1">Aap ab login kar sakte hain.</p>
+          <p className="text-[13px] text-slate-500 mb-5">
+            Password: <span className="font-mono text-teal-700 font-semibold">{sPreviewPwd}</span>
+          </p>
+          <Btn variant="primary" onClick={()=>{setMode("login"); setSignupDone(false); setName(sf.name); setPwd(sPreviewPwd);}}>
+            Login karein
+          </Btn>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Tab toggle ----
+  const tabCls = (active) =>
+    "flex-1 py-2 text-[13px] font-semibold rounded-lg transition-colors " +
+    (active ? "bg-teal-500 text-white shadow-sm" : "text-slate-500 hover:text-slate-700");
 
   return (
     <div className="min-h-screen flex items-center justify-center p-5">
@@ -525,36 +619,103 @@ function LoginScreen({toast}){
           </div>
         </div>
 
-        <form onSubmit={submit} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
-          <Field label="Your name" hindi="अपना नाम" required>
-            <input className={inputCls(false)} value={name} autoComplete="username"
-                   onChange={e=>setName(e.target.value)} placeholder="e.g. Ramesh Kumar" />
-          </Field>
-          <Field label="Password" hindi="पासवर्ड" required
-                 hint="Mobile number @ date of birth — jaise 9896011223@14051990">
-            <div className="relative">
-              <input className={inputCls(false)+" pr-11"} value={pwd} type={show?"text":"password"}
-                     autoComplete="current-password"
-                     onChange={e=>setPwd(e.target.value)} placeholder="9896011223@14051990" />
-              <button type="button" onClick={()=>setShow(s=>!s)} aria-label="Show password"
-                      className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-slate-500 hover:text-slate-700">
-                <Ico d={I.eye} className="w-4 h-4" />
-              </button>
-            </div>
-          </Field>
-          {err ? (
-            <div className="flex items-start gap-2 rounded-lg bg-rose-500/10 text-rose-700 px-3 py-2.5 text-[13px] mb-3">
-              <Ico d={I.alert} className="w-4 h-4 mt-0.5 shrink-0" /><span>{err}</span>
-            </div>
-          ) : null}
-          <Btn variant="primary" size="lg" className="w-full" disabled={busy} type="submit">
-            {busy ? <Spinner /> : null}{busy ? "Checking…" : "Login"}
-          </Btn>
-        </form>
+        {/* Tab switcher */}
+        <div className="flex gap-1 bg-slate-100 rounded-xl p-1 mb-5">
+          <button type="button" className={tabCls(mode==="login")} onClick={()=>{setMode("login"); setSErr("");}}>
+            Login
+          </button>
+          <button type="button" className={tabCls(mode==="signup")} onClick={()=>{setMode("signup"); setErr("");}}>
+            Sign Up &middot; नया खाता
+          </button>
+        </div>
+
+        {/* ---- LOGIN FORM ---- */}
+        {mode === "login" && (
+          <form onSubmit={submitLogin} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+            <Field label="Your name" hindi="अपना नाम" required>
+              <input className={inputCls(false)} value={name} autoComplete="username"
+                     onChange={e=>setName(e.target.value)} placeholder="e.g. Ramesh Kumar" />
+            </Field>
+            <Field label="Password" hindi="पासवर्ड" required
+                   hint="Mobile number @ date of birth — jaise 9896011223@14051990">
+              <div className="relative">
+                <input className={inputCls(false)+" pr-11"} value={pwd} type={show?"text":"password"}
+                       autoComplete="current-password"
+                       onChange={e=>setPwd(e.target.value)} placeholder="9896011223@14051990" />
+                <button type="button" onClick={()=>setShow(s=>!s)} aria-label="Show password"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-slate-500 hover:text-slate-700">
+                  <Ico d={I.eye} className="w-4 h-4" />
+                </button>
+              </div>
+            </Field>
+            {err ? (
+              <div className="flex items-start gap-2 rounded-lg bg-rose-500/10 text-rose-700 px-3 py-2.5 text-[13px] mb-3">
+                <Ico d={I.alert} className="w-4 h-4 mt-0.5 shrink-0" /><span>{err}</span>
+              </div>
+            ) : null}
+            <Btn variant="primary" size="lg" className="w-full" disabled={busy} type="submit">
+              {busy ? <Spinner /> : null}{busy ? "Checking…" : "Login"}
+            </Btn>
+          </form>
+        )}
+
+        {/* ---- SIGNUP FORM ---- */}
+        {mode === "signup" && (
+          <form onSubmit={submitSignup} className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+            <Field label="Full name" hindi="पूरा नाम" required error={sErrs.name}>
+              <input className={inputCls(sErrs.name)} value={sf.name}
+                     onChange={e=>sSet("name",e.target.value)} placeholder="Ramesh Kumar" />
+            </Field>
+            <Field label="Mobile number" hindi="मोबाइल नंबर" required error={sErrs.mobile}
+                   hint="Ek mobile number sirf ek baar signup ho sakta hai.">
+              <input className={inputCls(sErrs.mobile)} value={sf.mobile} inputMode="numeric" maxLength={14}
+                     onChange={e=>sSet("mobile",e.target.value)} placeholder="9896011223" />
+            </Field>
+            <Field label="Department" hindi="विभाग" required>
+              <select className={inputCls(false)} value={sf.department} onChange={e=>sSet("department",e.target.value)}>
+                {DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}
+              </select>
+            </Field>
+            {sf.department === "Other" && (
+              <Field label="New department name" hindi="नया विभाग" required error={sErrs.department_other}>
+                <input className={inputCls(sErrs.department_other)} value={sf.department_other}
+                       onChange={e=>sSet("department_other",e.target.value)} placeholder="e.g. QUALITY CHECK" />
+              </Field>
+            )}
+            <Field label="Designation" hindi="पद" required error={sErrs.designation}>
+              <input className={inputCls(sErrs.designation)} value={sf.designation}
+                     onChange={e=>sSet("designation",e.target.value)} placeholder="Machine Operator" />
+            </Field>
+            <Field label="Date of birth" hindi="जन्म तिथि" required error={sErrs.dob}>
+              <input type="date" className={inputCls(sErrs.dob)} value={sf.dob} max={todayStr()}
+                     onChange={e=>sSet("dob",e.target.value)} />
+            </Field>
+
+            {/* Password preview */}
+            {sPreviewPwd ? (
+              <div className="rounded-lg bg-teal-500/5 border border-teal-500/20 px-3 py-2.5 mb-3.5">
+                <p className="text-[11px] text-slate-500 mb-1">Aapka password hoga:</p>
+                <p className="font-mono text-[14px] text-teal-700 font-semibold tracking-wide">{sPreviewPwd}</p>
+                <p className="text-[10.5px] text-slate-400 mt-1">Rule: mobile@DDMMYYYY (janm tithi)</p>
+              </div>
+            ) : null}
+
+            {sErr ? (
+              <div className="flex items-start gap-2 rounded-lg bg-rose-500/10 text-rose-700 px-3 py-2.5 text-[13px] mb-3">
+                <Ico d={I.alert} className="w-4 h-4 mt-0.5 shrink-0" /><span>{sErr}</span>
+              </div>
+            ) : null}
+            <Btn variant="primary" size="lg" className="w-full" disabled={sBusy} type="submit">
+              {sBusy ? <Spinner /> : null}{sBusy ? "Creating…" : "Sign Up · खाता बनायें"}
+            </Btn>
+          </form>
+        )}
 
         <p className="text-[11px] text-slate-400 mt-4 text-center leading-relaxed">
-          Password bhool gaye? Apne admin se poochein.<br/>
-          Rule: 10-digit mobile, phir <span className="text-slate-500">@</span>, phir DDMMYYYY janm tithi.
+          {mode === "login"
+            ? <>Password bhool gaye? Apne admin se poochein.<br/>Rule: 10-digit mobile, phir <span className="text-slate-500">@</span>, phir DDMMYYYY janm tithi.</>
+            : <>Pehle se account hai? <button type="button" className="text-teal-600 font-semibold hover:underline" onClick={()=>setMode("login")}>Login karein</button></>
+          }
         </p>
       </div>
     </div>
@@ -901,7 +1062,7 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
       {/* ---------- HOST ACTION PANEL ---------- */}
       {canHostAct && c.status === "Pending" && (
         <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-4 mt-5">
-          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">By when will the work be finished? / काम कब तक हो जाएगा?</p>
+          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">Start work / काम शुरू करें</p>
           <Field label="Completion date &amp; time" hindi="कब तक ठीक होगा" required
                  hint="Yeh time user ko In-progress tab me dikhega.">
             <input type="datetime-local" className={inputCls(false)} value={eta} onChange={e=>setEta(e.target.value)} />
