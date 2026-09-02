@@ -156,6 +156,8 @@ const I = {
   ban:'<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
   doc:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
   send:'<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7Z"/>',
+  calendar:'<rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M16 3v3M8 3v3M3 9.5h18"/>',
+  trash:'<path d="M4 7h16"/><path d="M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/>',
 };
 
 // ============================================================
@@ -864,7 +866,7 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
       {/* ---------- HOST ACTION PANEL ---------- */}
       {canHostAct && c.status === "Pending" && (
         <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-4 mt-5">
-          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">Grievance resolution date ? / शिकायत समाधान की तारीख ?</p>
+          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">Start work / काम शुरू करें</p>
           <Field label="Completion date &amp; time" hindi="कब तक ठीक होगा" required
                  hint="Yeh time user ko In-progress tab me dikhega.">
             <input type="datetime-local" className={inputCls(false)} value={eta} onChange={e=>setEta(e.target.value)} />
@@ -1780,6 +1782,481 @@ function NoticeBoard({profile, toast, onView}){
 }
 
 // ============================================================
+// 12C. TASKS — Admin delegates with a planned date, the doer confirms it,
+//      Admin can revise the date up to 3 times, completion needs proof.
+// ============================================================
+const TASK_STAGES = [
+  { key:"Pending Confirmation", label:"Awaiting confirmation", hi:"पुष्टि बाकी" },
+  { key:"Assigned",             label:"Assigned",              hi:"सौंपा गया" },
+  { key:"Completed",            label:"Completed",             hi:"पूरा हुआ" },
+];
+
+// Yellow while on track, red once the planned date has passed — only meaningful
+// once a task is actually Assigned (confirmed); Pending/Completed aren't "due".
+function taskUrgency(t){
+  if (t.status !== "Assigned") return null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const pd = new Date(t.planned_date + "T00:00:00");
+  const diffDays = Math.round((pd - today) / 86400000);
+  if (diffDays < 0) return { tone:"rose",  border:"#f43f5e", label:`${-diffDays} din late` };
+  if (diffDays === 0) return { tone:"amber", border:"#f59e0b", label:"Aaj" };
+  if (diffDays === 1) return { tone:"amber", border:"#f59e0b", label:"Kal" };
+  return { tone:"amber", border:"#f59e0b", label:`${diffDays} din baad` };
+}
+function TaskStatusBadge({t}){
+  if (t.status === "Pending Confirmation") return <Badge tone="violet">Awaiting confirmation</Badge>;
+  if (t.status === "Completed") return <Badge tone="emerald">Completed</Badge>;
+  const u = taskUrgency(t);
+  return <Badge tone={u.tone}>{u.tone==="rose" ? `Overdue · ${u.label}` : `On track · ${u.label}`}</Badge>;
+}
+
+// Shared single-attachment picker (image, compressed, OR one PDF) — used for
+// task completion proof. Mirrors the Notice Board attachment pattern.
+function ProofPicker({att, setAtt, toast}){
+  const [imgBusy, setImgBusy] = useState(false);
+  const imgRef = useRef(null), pdfRef = useRef(null);
+
+  const pickImage = async (file) => {
+    if (!file) return;
+    setImgBusy(true);
+    try { const d = await compressImage(file); setAtt({data:d, mime:"image/jpeg", name:null}); }
+    catch(e){ toast(e.message, true); }
+    finally { setImgBusy(false); if (imgRef.current) imgRef.current.value = ""; }
+  };
+  const pickPdf = (file) => {
+    if (!file) return;
+    if (file.type !== "application/pdf") { toast("Sirf PDF file allowed hai.", true); return; }
+    if (file.size > NB_MAX_PDF_BYTES) { toast("PDF 3 MB se badi hai.", true); return; }
+    const reader = new FileReader();
+    reader.onerror = () => toast("PDF padh nahi paaye.", true);
+    reader.onload = () => setAtt({data:reader.result, mime:"application/pdf", name:file.name});
+    reader.readAsDataURL(file);
+    if (pdfRef.current) pdfRef.current.value = "";
+  };
+
+  return (
+    <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3">
+      {!att ? (
+        <div className="flex gap-2 flex-wrap">
+          <Btn size="sm" variant="outline" icon={I.camera} type="button" disabled={imgBusy} onClick={()=>imgRef.current?.click()}>
+            {imgBusy ? "Adding…" : "Take / add photo"}
+          </Btn>
+          <Btn size="sm" variant="outline" icon={I.doc} type="button" onClick={()=>pdfRef.current?.click()}>Add PDF</Btn>
+        </div>
+      ) : att.mime === "application/pdf" ? (
+        <div className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-[12.5px]">
+          <Ico d={I.doc} className="w-4 h-4 text-rose-500" /><span className="truncate max-w-[200px]">{att.name}</span>
+          <button type="button" onClick={()=>setAtt(null)} className="ml-1 text-slate-400 hover:text-slate-700"><Ico d={I.x} className="w-3.5 h-3.5"/></button>
+        </div>
+      ) : (
+        <div className="relative w-20 h-20 rounded-lg overflow-hidden border border-slate-300 bg-white">
+          <img src={att.data} className="w-full h-full object-cover" alt="Proof preview" />
+          <button type="button" onClick={()=>setAtt(null)}
+            className="absolute top-1 right-1 w-5 h-5 rounded-full bg-slate-900/70 text-white flex items-center justify-center">
+            <Ico d={I.x} className="w-3 h-3"/>
+          </button>
+        </div>
+      )}
+      <input ref={imgRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={e=>pickImage(e.target.files?.[0])} />
+      <input ref={pdfRef} type="file" accept="application/pdf" className="hidden" onChange={e=>pickPdf(e.target.files?.[0])} />
+      <p className="text-[11px] text-slate-500 mt-2.5">Photo ya PDF lagana zaroori hai — bina proof ke task complete nahi ho sakti.</p>
+    </div>
+  );
+}
+
+function TaskFormModal({profile, doers, onClose, onSaved, toast}){
+  const [f, setF] = useState({ assigned_to:"", planned_date:"", task_desc:"" });
+  const [errs, setErrs] = useState({});
+  const [busy, setBusy] = useState(false);
+  const set = (k,v) => setF(s => ({...s, [k]:v}));
+
+  const save = async () => {
+    const e = {};
+    if (!f.assigned_to) e.assigned_to = "Doer chunein.";
+    if (!f.planned_date) e.planned_date = "Planned date chunein.";
+    if (!f.task_desc || f.task_desc.trim().length < 4) e.task_desc = "Task thoda detail me likhein.";
+    setErrs(e);
+    if (Object.keys(e).length) return;
+
+    setBusy(true);
+    const { error } = await sb.from("tasks").insert({
+      assigned_to: f.assigned_to, planned_date: f.planned_date, task_desc: f.task_desc.trim(),
+    });
+    setBusy(false);
+    if (error) return toast(friendlyError(error), true);
+    toast("Task assign ho gayi. Doer ki confirmation ka wait hai.");
+    onSaved(); onClose();
+  };
+
+  return (
+    <Modal title="Add New Task" subtitle="नया टास्क सौंपें" onClose={onClose}
+      footer={<>
+        <Btn variant="outline" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" onClick={save} disabled={busy}>{busy?<Spinner/>:null}{busy?"Saving…":"Assign task"}</Btn>
+      </>}>
+      <Field label="Select doer" hindi="किसे सौंपें" required error={errs.assigned_to}>
+        <select className={inputCls(errs.assigned_to)} value={f.assigned_to} onChange={e=>set("assigned_to", e.target.value)}>
+          <option value="">Choose a person…</option>
+          {doers.map(d => (
+            <option key={d.id} value={d.id}>{d.name} — {d.department} · {d.mobile}</option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Planned date" hindi="तारीख" required error={errs.planned_date}
+             hint="Doer ke confirm karne ke baad hi task assign maani jayegi.">
+        <input type="date" className={inputCls(errs.planned_date)} value={f.planned_date} min={todayStr()}
+               onChange={e=>set("planned_date", e.target.value)} />
+      </Field>
+      <Field label="Task" hindi="टास्क का विवरण" required error={errs.task_desc}>
+        <textarea className={inputCls(errs.task_desc)+" min-h-[90px] resize-y"} value={f.task_desc}
+                  onChange={e=>set("task_desc", e.target.value)} placeholder="Describe the task in detail" />
+      </Field>
+    </Modal>
+  );
+}
+
+function TaskRow({t, onOpen}){
+  const u = taskUrgency(t);
+  const borderColor = t.status === "Completed" ? "#10b981" : t.status === "Pending Confirmation" ? "#8b5cf6" : (u ? u.border : "#cbd5e1");
+  return (
+    <button onClick={()=>onOpen(t)}
+      className="w-full text-left px-4 py-3.5 hover:bg-slate-100 transition-colors border-l-2 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4"
+      style={{borderLeftColor: borderColor}}>
+      <div className="sm:w-36 shrink-0 min-w-0">
+        <p className="font-semibold text-[13px] truncate">{t.assigned_to_name}</p>
+        <p className="font-mono text-[11.5px] text-slate-500 truncate">{t.assigned_to_mobile}</p>
+      </div>
+      <div className="grow min-w-0">
+        <p className="text-[13px] text-slate-700 truncate">{t.task_desc}</p>
+        <p className="text-[11.5px] text-slate-500 truncate">By {t.assigned_by_name}{t.revision_count>0 ? ` · Revised ${t.revision_count}/3` : ""}</p>
+      </div>
+      <div className="sm:w-32 shrink-0">
+        <p className="text-[10.5px] uppercase tracking-wide text-slate-500">Planned</p>
+        <p className="text-[12.5px] font-semibold text-slate-800">{fmtDate(t.planned_date)}</p>
+      </div>
+      <div className="shrink-0"><TaskStatusBadge t={t} /></div>
+    </button>
+  );
+}
+
+function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
+  const t = task;
+  const isAdmin = profile.role === "Admin";
+  const isDoer = t.assigned_to === profile.id;
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [newDate, setNewDate] = useState(t.planned_date);
+  const [note, setNote] = useState("");
+  const [proof, setProof] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [delBusy, setDelBusy] = useState(false);
+
+  const run = async (patch, msg) => {
+    setBusy(true); setErr("");
+    const { error } = await sb.from("tasks").update(patch).eq("id", t.id);
+    setBusy(false);
+    if (error){ setErr(friendlyError(error)); return; }
+    toast(msg); onSaved(); onClose();
+  };
+
+  const updateDate = () => {
+    if (!newDate) return setErr("Date chunein.");
+    if (newDate === t.planned_date) return onClose();
+    run({ planned_date:newDate },
+      t.status === "Pending Confirmation" ? "Planned date update ho gayi." : `Planned date revise ho gayi (${t.revision_count+1}/3).`);
+  };
+  const confirmDate = () => run({ status:"Assigned" }, "Task confirm ho gayi — ab yeh assigned hai.");
+  const markDone = () => {
+    if (!proof) return setErr("Photo ya document lagana zaroori hai.");
+    run({ status:"Completed", proof_data:proof.data, proof_mime:proof.mime, proof_name:proof.name, completion_note: note.trim() || null },
+      `Task complete mark ho gayi.`);
+  };
+  const doDelete = async () => {
+    setDelBusy(true);
+    const { error } = await sb.from("tasks").delete().eq("id", t.id);
+    setDelBusy(false); setConfirmDel(false);
+    if (error) return toast(friendlyError(error), true);
+    toast("Task delete ho gayi."); onSaved(); onClose();
+  };
+
+  const Row = ({k, v}) => (
+    <div className="min-w-0"><p className="text-[10.5px] uppercase tracking-wide text-slate-500">{k}</p><p className="text-[13.5px] text-slate-800 break-words">{v}</p></div>
+  );
+
+  return (
+    <Modal title="Task" subtitle={`${t.assigned_to_name} · ${fmtDate(t.planned_date)}`} onClose={onClose}
+      footer={<>
+        {isAdmin && <Btn variant="danger" icon={I.trash} className="mr-auto" onClick={()=>setConfirmDel(true)} disabled={busy}>Delete</Btn>}
+        <Btn variant="outline" onClick={onClose}>Close</Btn>
+      </>}>
+      <div className="flex items-center gap-2 flex-wrap mb-4">
+        <TaskStatusBadge t={t} />
+        {t.first_planned_date !== t.planned_date && <Badge tone="slate">First date: {fmtDate(t.first_planned_date)}</Badge>}
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 mb-4">
+        <Row k="Doer" v={<>{t.assigned_to_name}<br/><span className="text-slate-500 font-mono text-[12px]">{t.assigned_to_mobile}</span></>} />
+        <Row k="Assigned by" v={t.assigned_by_name} />
+      </div>
+
+      <div className="mb-4">
+        <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-1.5">Task / विवरण</p>
+        <p className="rounded-lg bg-slate-100 px-3.5 py-3 text-[13.5px] whitespace-pre-wrap leading-relaxed">{t.task_desc}</p>
+      </div>
+
+      {t.revision_history?.length > 0 && (
+        <div className="mb-4">
+          <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-1.5">Revision history</p>
+          <div className="rounded-xl border border-slate-200 divide-y divide-slate-200">
+            {t.revision_history.map((r,i)=>(
+              <div key={i} className="flex items-center gap-2.5 px-3.5 py-2 text-[12.5px]">
+                <Ico d={I.refresh} className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="text-slate-500">{fmtDate(r.old_date)} → <span className="text-slate-800 font-semibold">{fmtDate(r.new_date)}</span></span>
+                <span className="ml-auto text-slate-400">{r.revised_by} · {fmtDateTime(r.revised_at)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {t.status === "Completed" && (
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 mb-4">
+          <p className="text-[11px] uppercase tracking-wide text-emerald-700 font-semibold mb-2">Completed · {fmtDateTime(t.completed_at)}</p>
+          {t.completion_note ? <p className="text-[13px] text-slate-700 whitespace-pre-wrap mb-2">{t.completion_note}</p> : null}
+          {t.proof_mime === "application/pdf" ? (
+            <a href={t.proof_data} download={t.proof_name || "proof.pdf"} target="_blank" rel="noreferrer"
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-[12.5px] text-slate-700 hover:border-slate-400">
+              <Ico d={I.doc} className="w-4 h-4 text-rose-500" />{t.proof_name || "Proof.pdf"}
+            </a>
+          ) : (
+            <img src={t.proof_data} alt="Completion proof" className="w-28 h-28 rounded-lg object-cover border border-slate-300" />
+          )}
+        </div>
+      )}
+
+      {/* ---------- ADMIN: free edit before confirmation / capped revision after ---------- */}
+      {isAdmin && t.status !== "Completed" && (
+        <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-4 mb-4">
+          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">
+            {t.status === "Pending Confirmation" ? "Planned date badlein (confirm hone tak free)" : `Planned date revise karein (${t.revision_count}/3 used)`}
+          </p>
+          {t.status === "Assigned" && t.revision_count >= 3 ? (
+            <p className="text-[13px] text-rose-600">Revision limit (3/3) khatam ho chuki hai — ab date badal nahi sakte.</p>
+          ) : (
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="date" className={inputCls(false)+" w-auto"} value={newDate} min={todayStr()} onChange={e=>setNewDate(e.target.value)} />
+              <Btn size="sm" variant="primary" onClick={updateDate} disabled={busy}>{busy?<Spinner/>:null}Save date</Btn>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------- DOER: confirm the date ---------- */}
+      {isDoer && t.status === "Pending Confirmation" && (
+        <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4 mb-4">
+          <p className="text-[13px] font-semibold text-violet-800 mb-1">Is planned date ko confirm karein?</p>
+          <p className="text-[12.5px] text-slate-500 mb-3">Confirm karne ke baad hi yeh task aapko assign maani jayegi.</p>
+          <Btn variant="ok" icon={I.check} onClick={confirmDate} disabled={busy}>{busy?<Spinner/>:null}Confirm {fmtDate(t.planned_date)}</Btn>
+        </div>
+      )}
+
+      {/* ---------- DOER: mark complete with mandatory proof ---------- */}
+      {isDoer && t.status === "Assigned" && (
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 mb-4">
+          <p className="text-[11px] uppercase tracking-wide text-emerald-700 font-semibold mb-3">Task complete karein</p>
+          <Field label="Proof" hindi="फोटो / दस्तावेज़" required>
+            <ProofPicker att={proof} setAtt={setProof} toast={toast} />
+          </Field>
+          <Field label="Note" hindi="टिप्पणी (optional)">
+            <textarea className={inputCls(false)+" min-h-[64px] resize-y"} value={note}
+                      onChange={e=>setNote(e.target.value)} placeholder="Kya kiya gaya…" />
+          </Field>
+          <Btn variant="ok" icon={I.check} onClick={markDone} disabled={busy}>{busy?<Spinner/>:null}Mark complete</Btn>
+        </div>
+      )}
+
+      {err ? (
+        <div className="flex items-start gap-2 rounded-lg bg-rose-500/10 text-rose-700 px-3 py-2.5 text-[13px]">
+          <Ico d={I.alert} className="w-4 h-4 mt-0.5 shrink-0" /><span>{err}</span>
+        </div>
+      ) : null}
+
+      {confirmDel && (
+        <div className="fixed inset-0 z-[70] bg-slate-900/40 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4"
+             onMouseDown={e=>{ if(e.target===e.currentTarget && !delBusy) setConfirmDel(false); }}>
+          <div className="bg-white border border-slate-200 w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl shadow-2xl">
+            <div className="px-5 py-4 border-b border-slate-200"><h3 className="font-semibold text-[15px]">Delete this task?</h3></div>
+            <div className="px-5 py-4"><p className="text-[13.5px] text-slate-700">Yeh task hamesha ke liye hat jayegi.</p></div>
+            <div className="px-5 py-3.5 border-t border-slate-200 flex gap-2 justify-end">
+              <Btn variant="outline" onClick={()=>setConfirmDel(false)} disabled={delBusy}>Cancel</Btn>
+              <Btn variant="danger" onClick={doDelete} disabled={delBusy}>{delBusy?<Spinner/>:null}Delete</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// Both the Admin's full board and everyone's "My Tasks" view share this list
+// engine — realtime-subscribed, filterable, tabbed by stage.
+function TaskList({profile, doers, scope, toast}){
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [stage, setStage] = useState("Assigned");
+  const [q, setQ] = useState("");
+  const [doerF, setDoerF] = useState("All");
+  const [openTask, setOpenTask] = useState(null);
+  const [showNew, setShowNew] = useState(false);
+
+  const load = useCallback(async ()=>{
+    setLoading(true);
+    let query = sb.from("tasks").select("*").order("created_at", {ascending:false});
+    if (scope === "mine") query = query.eq("assigned_to", profile.id);
+    const { data, error } = await query;
+    setLoading(false);
+    if (error) return toast(friendlyError(error), true);
+    setTasks(data || []);
+  },[toast, scope, profile.id]);
+  useEffect(()=>{ load(); },[load]);
+
+  useEffect(()=>{
+    const channel = sb.channel(`tasks_live_${scope}`)
+      .on("postgres_changes", {event:"*", schema:"public", table:"tasks"}, payload => {
+        setTasks(prev => {
+          const belongs = row => scope !== "mine" || row.assigned_to === profile.id;
+          if (payload.eventType === "INSERT"){
+            if (!belongs(payload.new) || prev.some(x=>x.id===payload.new.id)) return prev;
+            return [payload.new, ...prev];
+          }
+          if (payload.eventType === "UPDATE"){
+            if (!belongs(payload.new)) return prev.filter(x=>x.id!==payload.new.id);
+            return prev.map(x => x.id===payload.new.id ? payload.new : x);
+          }
+          if (payload.eventType === "DELETE") return prev.filter(x => x.id !== payload.old.id);
+          return prev;
+        });
+      }).subscribe();
+    return ()=>{ sb.removeChannel(channel); };
+  },[scope, profile.id]);
+
+  // Keep an open detail modal in sync with live updates.
+  useEffect(()=>{
+    if (!openTask) return;
+    const fresh = tasks.find(x=>x.id===openTask.id);
+    if (fresh && fresh.updated_at !== openTask.updated_at) setOpenTask(fresh);
+    if (!fresh) setOpenTask(null);
+  },[tasks]);   // eslint-disable-line
+
+  const counts = useMemo(()=>{
+    const o = {}; TASK_STAGES.forEach(s => o[s.key] = tasks.filter(t=>t.status===s.key).length); return o;
+  },[tasks]);
+
+  const shown = useMemo(()=>{
+    const n = q.trim().toLowerCase();
+    return tasks.filter(t => {
+      if (t.status !== stage) return false;
+      if (doerF !== "All" && t.assigned_to !== doerF) return false;
+      if (n && ![t.assigned_to_name, t.task_desc, t.assigned_by_name].join(" ").toLowerCase().includes(n)) return false;
+      return true;
+    }).sort((a,b) => (a.planned_date||"").localeCompare(b.planned_date||""));
+  },[tasks, stage, q, doerF]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <div>
+          <h2 className="font-bold text-[17px]">{scope==="mine" ? "My Tasks" : "All Tasks"}</h2>
+          <p className="text-[12.5px] text-slate-500">{scope==="mine" ? "आपके टास्क" : "सब टास्क — admin only"}</p>
+        </div>
+        {scope !== "mine" && (
+          <Btn variant="primary" icon={I.plus} className="ml-auto" onClick={()=>setShowNew(true)}>Add Task</Btn>
+        )}
+      </div>
+
+      <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
+        {TASK_STAGES.map(s => (
+          <button key={s.key} onClick={()=>setStage(s.key)}
+            className={`shrink-0 rounded-xl px-4 py-2.5 text-left transition-colors border ${
+              stage===s.key ? "bg-teal-500/15 border-teal-500/50" : "bg-white border-slate-200 hover:border-slate-300"}`}>
+            <span className={`block text-[13px] font-semibold ${stage===s.key?"text-teal-800":"text-slate-700"}`}>
+              {s.label} <span className="font-mono text-[11.5px] opacity-70">{counts[s.key]||0}</span>
+            </span>
+            <span className="block text-[11px] text-slate-500">{s.hi}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="flex gap-2 mb-3 flex-wrap">
+        <div className="relative grow min-w-[180px]">
+          <Ico d={I.search} className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input className={inputCls(false)+" pl-9"} value={q} onChange={e=>setQ(e.target.value)} placeholder="Search naam ya task…" />
+        </div>
+        {scope !== "mine" && (
+          <select className={inputCls(false)+" w-auto"} value={doerF} onChange={e=>setDoerF(e.target.value)}>
+            <option value="All">All doers</option>
+            {doers.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
+        )}
+        <Btn variant="outline" icon={I.refresh} onClick={load} aria-label="Refresh" />
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50 overflow-hidden divide-y divide-slate-200 shadow-sm">
+        {loading ? Array.from({length:4}).map((_,i)=>(
+          <div key={i} className="px-4 py-4"><div className="h-3 rounded bg-slate-100 animate-pulse" style={{width:`${55+i*9}%`}} /></div>
+        )) : shown.length === 0 ? (
+          <div className="px-5 py-16 text-center">
+            <Ico d={I.calendar} className="w-9 h-9 mx-auto text-slate-300 mb-3" />
+            <p className="font-semibold text-slate-700">Yahan koi task nahi</p>
+            <p className="text-[13px] text-slate-500 mt-1">
+              {tasks.length ? "Filter ya search clear karke dekhein." : (scope==="mine" ? "Abhi koi task assign nahi hui." : "“Add Task” se nayi task banayein.")}
+            </p>
+          </div>
+        ) : shown.map(t => <TaskRow key={t.id} t={t} onOpen={setOpenTask} />)}
+      </div>
+
+      {showNew && (
+        <TaskFormModal profile={profile} doers={doers} toast={toast} onClose={()=>setShowNew(false)} onSaved={load} />
+      )}
+      {openTask && (
+        <TaskDetailModal task={openTask} profile={profile} doers={doers} toast={toast}
+          onClose={()=>setOpenTask(null)} onSaved={load} />
+      )}
+    </div>
+  );
+}
+
+function TasksPanel({profile, toast}){
+  const [sub, setSub] = useState("mine");
+  const [doers, setDoers] = useState([]);
+
+  useEffect(()=>{
+    sb.from("profiles").select("id,name,mobile,department").eq("is_active", true).order("name")
+      .then(({data}) => setDoers(data || []));
+  },[]);
+
+  if (profile.role !== "Admin") return <TaskList profile={profile} doers={doers} scope="mine" toast={toast} />;
+
+  return (
+    <div>
+      <div className="flex rounded-lg border border-slate-200 overflow-hidden w-fit mb-5">
+        <button onClick={()=>setSub("mine")}
+          className={`px-3.5 py-2 text-[12.5px] font-medium ${sub==="mine"?"bg-slate-100 text-slate-900":"text-slate-500 hover:text-slate-800"}`}>
+          My Tasks
+        </button>
+        <button onClick={()=>setSub("all")}
+          className={`px-3.5 py-2 text-[12.5px] font-medium ${sub==="all"?"bg-slate-100 text-slate-900":"text-slate-500 hover:text-slate-800"}`}>
+          All Tasks
+        </button>
+      </div>
+      {sub === "mine"
+        ? <TaskList profile={profile} doers={doers} scope="mine" toast={toast} />
+        : <TaskList profile={profile} doers={doers} scope="all" toast={toast} />}
+    </div>
+  );
+}
+
+// ============================================================
 // 13. STATS STRIP
 // ============================================================
 function Stats({rows, profile}){
@@ -1940,6 +2417,7 @@ function App(){
   const navItems = [
     { key:"complaints", label:"Complaints" },
     { key:"notices", label:"Notice Board" },
+    { key:"tasks", label:"Tasks" },
     ...(profile.role === "Admin" ? [{ key:"machines", label:"Machines" }, { key:"users", label:"Users" }] : []),
   ];
 
@@ -1974,6 +2452,8 @@ function App(){
           <AdminMachines toast={toast} onMachinesChanged={loadMachines} />
         ) : view === "notices" ? (
           <NoticeBoard profile={profile} toast={toast} onView={setLightbox} />
+        ) : view === "tasks" ? (
+          <TasksPanel profile={profile} toast={toast} />
         ) : (
           <>
             <Stats rows={rows} profile={profile} />
