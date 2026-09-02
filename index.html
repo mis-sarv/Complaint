@@ -59,12 +59,12 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 // ============================================================
 const DEPARTMENTS = ["Knitting","Dyeing","Printing","Shearing","Embossing","Finishing",
                      "Cutting & Stitching","Packing","Utility","Maintenance","Housekeeping","MIS","Other"];
-const COMPLAINT_TYPES = ["Mechanical","Electrical","Electronic","Housekeeping","Breakdown",
-                         "Preventive Maintenance","Spare Required","Safety","Other"];
+const COMPLAINT_TYPES = ["Mechanical","Electrical","Housekeeping","Other"];
 const ROLES = ["User","Host","Admin","Maintenance"];
-const DOWN_TYPES = ["Breakdown","Safety"];
+const DOWN_TYPES = COMPLAINT_TYPES;   // every type now flags a machine "down" — Admin's call
 const MAX_PHOTOS = 4;
 const MAX_IMG_CHARS = 380000;   // DB cap is 400,000 — leave headroom
+const NB_MAX_PDF_BYTES = 3 * 1024 * 1024;   // Notice Board PDF cap — keeps the row and mobile data sane
 
 const TABS = [
   { key:"Pending",     label:"Pending",     hi:"बाकी",      statuses:["Pending"] },
@@ -154,6 +154,8 @@ const I = {
   eye:'<path d="M2 12s3.8-6.5 10-6.5S22 12 22 12s-3.8 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/>',
   key:'<circle cx="8" cy="14" r="4.2"/><path d="m11 11 8-8 2.5 2.5-1.6 1.6L18 5.6l-1.7 1.7 1.6 1.6L16.3 10 14.7 8.4"/>',
   ban:'<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+  doc:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>',
+  send:'<path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7Z"/>',
 };
 
 // ============================================================
@@ -529,7 +531,6 @@ function LoginScreen({toast}){
 // ============================================================
 function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView}){
   const [f, setF] = useState({
-    problem_date: todayStr(),
     machine_pick: machines.length ? `${machines[0].machine_name}||${machines[0].machine_no}` : "Other",
     other_machine_name: "",
     machine_no: machines.length ? machines[0].machine_no : "",
@@ -539,6 +540,10 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
   const [photos, setPhotos] = useState([]);
   const [errs, setErrs] = useState({});
   const [busy, setBusy] = useState(false);
+  // Shown as the auto-stamped "Date of problem" — the real value is set by the
+  // database trigger at insert time (mc_stamp_owner), so this is a display-only
+  // clock, not the value that gets saved. Frozen at mount so it doesn't tick.
+  const nowRef = useRef(new Date().toISOString());
 
   const isOther = f.machine_pick === "Other";
   const set = (k,v) => setF(s => ({...s, [k]:v}));
@@ -551,15 +556,16 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
 
   const save = async () => {
     const e = {};
-    if (!f.problem_date) e.problem_date = "Tareekh chunein.";
     if (!f.problem_desc || f.problem_desc.trim().length < 4) e.problem_desc = "Problem thoda detail me likhein.";
     if (isOther && !f.other_machine_name.trim()) e.other_machine_name = "Machine ka naam likhein.";
+    if (!photos.length) e.photos = "Kam se kam ek photo lagana zaroori hai.";
     setErrs(e);
     if (Object.keys(e).length) return;
 
     setBusy(true);
     const row = {
-      problem_date: f.problem_date,
+      // problem_date is NOT sent — the database always stamps its own server
+      // clock on insert (mc_stamp_owner), so it can never be backdated or faked.
       machine_name: isOther ? "Other" : f.machine_pick.split("||")[0],
       machine_no: f.machine_no.trim() || null,
       other_machine_name: isOther ? f.other_machine_name.trim() : null,
@@ -602,10 +608,14 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
         <span className="ml-auto text-[10px] uppercase tracking-wide text-slate-500 shrink-0">Auto</span>
       </div>
 
-      <Field label="Date of problem" hindi="तारीख" required error={errs.problem_date}>
-        <input type="date" className={inputCls(errs.problem_date)} value={f.problem_date} max={todayStr()}
-               onChange={e=>set("problem_date", e.target.value)} />
-      </Field>
+      <div className="rounded-xl bg-slate-100 border border-slate-200 px-3.5 py-3 mb-4 flex items-center gap-3">
+        <Ico d={I.clock} className="w-5 h-5 text-teal-700 shrink-0" />
+        <div className="min-w-0">
+          <p className="text-[10.5px] uppercase tracking-wide text-slate-500">Date of problem · तारीख</p>
+          <p className="text-sm font-semibold text-slate-800">{fmtDateTime(nowRef.current)}</p>
+        </div>
+        <span className="ml-auto text-[10px] uppercase tracking-wide text-slate-500 shrink-0 text-right">Auto<br/>badal nahi sakte</span>
+      </div>
 
       <Field label="Machine" hindi="मशीन का नाम" required>
         <select className={inputCls(false)} value={f.machine_pick} onChange={e=>pickMachine(e.target.value)}>
@@ -643,7 +653,7 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
         </select>
       </Field>
 
-      <Field label="Photo" hindi="शिकायत की फोटो">
+      <Field label="Photo" hindi="शिकायत की फोटो" required error={errs.photos}>
         <PhotoCapture photos={photos} setPhotos={setPhotos} toast={toast} onView={onView} />
       </Field>
     </Modal>
@@ -759,7 +769,7 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
   );
 
   return (
-    <Modal title={c.complaint_no} subtitle={`${c.machine_no || "—"} · ${fmtDate(c.problem_date)}`} onClose={onClose} wide
+    <Modal title={c.complaint_no} subtitle={`${c.machine_no || "—"} · ${fmtDateTime(c.problem_date)}`} onClose={onClose} wide
       footer={
         <>
           {canDelete &&
@@ -854,7 +864,7 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
       {/* ---------- HOST ACTION PANEL ---------- */}
       {canHostAct && c.status === "Pending" && (
         <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-4 mt-5">
-          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">Start work / काम शुरू करें</p>
+          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">Grievance resolution date ? / शिकायत समाधान की तारीख ?</p>
           <Field label="Completion date &amp; time" hindi="कब तक ठीक होगा" required
                  hint="Yeh time user ko In-progress tab me dikhega.">
             <input type="datetime-local" className={inputCls(false)} value={eta} onChange={e=>setEta(e.target.value)} />
@@ -1356,6 +1366,420 @@ function AdminUsers({profile, toast, callAdmin}){
 }
 
 // ============================================================
+// 12A. ADMIN — MACHINE LIST PANEL
+//      Direct table CRUD — RLS already grants Admin full access (ml_write).
+// ============================================================
+function MachineFormModal({editing, onClose, onSaved, toast}){
+  const isEdit = !!editing;
+  const [f, setF] = useState({
+    machine_name: editing?.machine_name || "",
+    machine_no: editing?.machine_no || "",
+    department: editing?.department || DEPARTMENTS[0],
+  });
+  const [errs, setErrs] = useState({});
+  const [busy, setBusy] = useState(false);
+  const set = (k,v) => setF(s => ({...s, [k]:v}));
+
+  const save = async () => {
+    const e = {};
+    if (!f.machine_name.trim()) e.machine_name = "Machine ka naam likhein.";
+    if (!f.machine_no.trim()) e.machine_no = "Machine number likhein.";
+    setErrs(e);
+    if (Object.keys(e).length) return;
+
+    setBusy(true);
+    const row = { machine_name: f.machine_name.trim(), machine_no: f.machine_no.trim(), department: f.department };
+    const { error } = isEdit
+      ? await sb.from("machine_list").update(row).eq("id", editing.id)
+      : await sb.from("machine_list").insert(row);
+    setBusy(false);
+    if (error) return toast(friendlyError(error), true);
+    toast(isEdit ? "Machine update ho gayi." : "Machine add ho gayi.");
+    onSaved();
+    onClose();
+  };
+
+  return (
+    <Modal title={isEdit ? "Edit machine" : "Add new machine"} subtitle={isEdit ? editing.machine_no : "नई मशीन जोड़ें"} onClose={onClose}
+      footer={<>
+        <Btn variant="outline" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" onClick={save} disabled={busy}>{busy?<Spinner/>:null}{busy?"Saving…":(isEdit?"Save changes":"Add machine")}</Btn>
+      </>}>
+      <Field label="Machine name" hindi="मशीन का नाम" required error={errs.machine_name}>
+        <input className={inputCls(errs.machine_name)} value={f.machine_name}
+               onChange={e=>set("machine_name", e.target.value)} placeholder="Circular Knitting Machine" />
+      </Field>
+      <Field label="Machine no" hindi="मशीन नंबर" required error={errs.machine_no}>
+        <input className={inputCls(errs.machine_no)} value={f.machine_no}
+               onChange={e=>set("machine_no", e.target.value)} placeholder="KM-05" />
+      </Field>
+      <Field label="Department" hindi="विभाग" required>
+        <select className={inputCls(false)} value={f.department} onChange={e=>set("department", e.target.value)}>
+          {DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}
+        </select>
+      </Field>
+    </Modal>
+  );
+}
+
+function AdminMachines({toast, onMachinesChanged}){
+  const [list, setList] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
+  const [deptF, setDeptF] = useState("All");
+  const [editing, setEditing] = useState(undefined);   // undefined = closed, null = new
+  const [confirm, setConfirm] = useState(null);
+  const [delBusy, setDelBusy] = useState(false);
+
+  const load = useCallback(async ()=>{
+    setLoading(true);
+    const { data, error } = await sb.from("machine_list").select("*")
+      .order("department").order("machine_name").order("machine_no");
+    setLoading(false);
+    if (error) return toast(friendlyError(error), true);
+    setList(data || []);
+  },[toast]);
+  useEffect(()=>{ load(); },[load]);
+
+  const shown = useMemo(()=>{
+    const n = q.trim().toLowerCase();
+    return list.filter(m => {
+      if (deptF !== "All" && m.department !== deptF) return false;
+      if (n && ![m.machine_name,m.machine_no,m.department].join(" ").toLowerCase().includes(n)) return false;
+      return true;
+    });
+  },[list,q,deptF]);
+
+  const saved = () => { load(); onMachinesChanged && onMachinesChanged(); };
+
+  const doDelete = async (m) => {
+    setDelBusy(true);
+    const { error } = await sb.from("machine_list").delete().eq("id", m.id);
+    setDelBusy(false);
+    setConfirm(null);
+    if (error) return toast(friendlyError(error), true);
+    toast(`${m.machine_no} delete ho gayi.`);
+    saved();
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <div>
+          <h2 className="font-bold text-[17px]">Machine List</h2>
+          <p className="text-[12.5px] text-slate-500">मशीन सूची &mdash; admin only</p>
+        </div>
+        <Btn variant="primary" icon={I.plus} className="ml-auto" onClick={()=>setEditing(null)}>Add machine</Btn>
+      </div>
+
+      <div className="flex gap-2 mb-3 flex-wrap">
+        <div className="relative grow min-w-[180px]">
+          <Ico d={I.search} className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input className={inputCls(false)+" pl-9"} value={q} onChange={e=>setQ(e.target.value)} placeholder="Search machine, no, department…" />
+        </div>
+        <select className={inputCls(false)+" w-auto"} value={deptF} onChange={e=>setDeptF(e.target.value)}>
+          <option value="All">All departments</option>
+          {DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}
+        </select>
+        <Btn variant="outline" icon={I.refresh} onClick={load} aria-label="Refresh" />
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50 overflow-hidden divide-y divide-slate-200 shadow-sm">
+        {loading ? Array.from({length:4}).map((_,i)=>(
+          <div key={i} className="px-4 py-4"><div className="h-3 rounded bg-slate-100 animate-pulse" style={{width:`${50+i*10}%`}}/></div>
+        )) : shown.length === 0 ? (
+          <div className="px-5 py-14 text-center">
+            <Ico d={I.clipboard} className="w-9 h-9 mx-auto text-slate-300 mb-3" />
+            <p className="font-semibold text-slate-700">Koi machine nahi mili</p>
+          </div>
+        ) : shown.map(m => (
+          <div key={m.id} className="px-4 py-3.5 flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="w-9 h-9 rounded-full bg-slate-100 text-slate-700 grid place-items-center font-bold text-[11px] shrink-0">
+              {m.machine_no.slice(0,2).toUpperCase()}
+            </div>
+            <div className="min-w-0 sm:w-56">
+              <p className="font-semibold text-[13.5px] truncate">{m.machine_name}</p>
+              <p className="text-[11.5px] text-slate-500 truncate font-mono">{m.machine_no}</p>
+            </div>
+            <div className="grow min-w-0">
+              <Badge tone="slate">{m.department}</Badge>
+            </div>
+            <div className="flex gap-1.5 shrink-0">
+              <Btn size="sm" variant="outline" icon={I.pen} onClick={()=>setEditing(m)}>Edit</Btn>
+              <Btn size="sm" variant="ghost" icon={I.x} onClick={()=>setConfirm(m)} title="Delete" />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="text-[11.5px] text-slate-400 mt-3 leading-relaxed">
+        Delete permanent hai — list se hamesha ke liye hat jayegi. Purani complaints me machine ka naam text ke roop me safe rehta hai.
+      </p>
+
+      {editing !== undefined && (
+        <MachineFormModal editing={editing} onClose={()=>setEditing(undefined)} onSaved={saved} toast={toast} />
+      )}
+      {confirm && (
+        <Modal title="Delete machine?" subtitle={confirm.machine_no} onClose={()=>setConfirm(null)}
+          footer={<>
+            <Btn variant="outline" onClick={()=>setConfirm(null)} disabled={delBusy}>Cancel</Btn>
+            <Btn variant="danger" onClick={()=>doDelete(confirm)} disabled={delBusy}>{delBusy?<Spinner/>:null}Delete permanently</Btn>
+          </>}>
+          <p className="text-[13.5px] text-slate-700">
+            <strong>{confirm.machine_name} ({confirm.machine_no})</strong> list se hamesha ke liye hat jayegi.
+          </p>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// 12B. NOTICE BOARD — text / image / PDF posts, Admin "mark done" workflow,
+//      live for everyone via Supabase Realtime (postgres_changes).
+// ============================================================
+function NoticeAttachment({post, onView}){
+  if (!post.attachment_data) return null;
+  if ((post.attachment_mime||"").startsWith("image/")) {
+    return (
+      <img src={post.attachment_data} alt="Notice attachment" onClick={()=>onView(post.attachment_data)}
+        className="mt-2.5 w-28 h-28 rounded-lg object-cover border border-slate-300 cursor-zoom-in" />
+    );
+  }
+  if (post.attachment_mime === "application/pdf") {
+    return (
+      <a href={post.attachment_data} download={post.attachment_name || "notice.pdf"} target="_blank" rel="noreferrer"
+        className="mt-2.5 inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-[12.5px] text-slate-700 hover:border-slate-400 max-w-full">
+        <Ico d={I.doc} className="w-4 h-4 text-rose-500 shrink-0" /><span className="truncate">{post.attachment_name || "Attachment.pdf"}</span>
+      </a>
+    );
+  }
+  return null;
+}
+
+function NoticeComposer({profile, toast}){
+  const [msg, setMsg] = useState("");
+  const [att, setAtt] = useState(null);   // {data, mime, name}
+  const [imgBusy, setImgBusy] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const imgRef = useRef(null), pdfRef = useRef(null);
+
+  const pickImage = async (file) => {
+    if (!file) return;
+    setImgBusy(true);
+    try { const d = await compressImage(file); setAtt({data:d, mime:"image/jpeg", name:null}); }
+    catch(e){ toast(e.message, true); }
+    finally { setImgBusy(false); if (imgRef.current) imgRef.current.value = ""; }
+  };
+  const pickPdf = (file) => {
+    if (!file) return;
+    if (file.type !== "application/pdf") { toast("Sirf PDF file allowed hai.", true); return; }
+    if (file.size > NB_MAX_PDF_BYTES) { toast("PDF 3 MB se badi hai. Chhoti file lagayein.", true); return; }
+    const reader = new FileReader();
+    reader.onerror = () => toast("PDF padh nahi paaye.", true);
+    reader.onload = () => setAtt({data:reader.result, mime:"application/pdf", name:file.name});
+    reader.readAsDataURL(file);
+    if (pdfRef.current) pdfRef.current.value = "";
+  };
+
+  const post = async () => {
+    if (!msg.trim() && !att) return toast("Kuch likhein ya photo/PDF lagayein.", true);
+    setBusy(true);
+    const { error } = await sb.from("notice_board").insert({
+      message: msg.trim() || null,
+      attachment_data: att?.data || null,
+      attachment_mime: att?.mime || null,
+      attachment_name: att?.name || null,
+    });
+    setBusy(false);
+    if (error) return toast(friendlyError(error), true);
+    setMsg(""); setAtt(null);
+    // No manual refresh — the Realtime INSERT event appends it for everyone, this client included.
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-3.5 mb-4">
+      <div className="flex items-start gap-3">
+        <div className="w-9 h-9 rounded-full bg-teal-500/15 text-teal-700 grid place-items-center font-bold text-sm shrink-0">
+          {profile.name.slice(0,1).toUpperCase()}
+        </div>
+        <textarea className={inputCls(false)+" min-h-[54px] resize-y"} value={msg}
+          onChange={e=>setMsg(e.target.value)} placeholder="Notice board par kuch likhein… सूचना यहाँ लिखें" />
+      </div>
+      {att && (
+        <div className="mt-2.5 ml-12">
+          {att.mime === "application/pdf" ? (
+            <div className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-[12.5px]">
+              <Ico d={I.doc} className="w-4 h-4 text-rose-500" /><span className="truncate max-w-[180px]">{att.name}</span>
+              <button type="button" onClick={()=>setAtt(null)} className="ml-1 text-slate-400 hover:text-slate-700">
+                <Ico d={I.x} className="w-3.5 h-3.5"/>
+              </button>
+            </div>
+          ) : (
+            <div className="relative w-20 h-20 rounded-lg overflow-hidden border border-slate-300 bg-slate-100">
+              <img src={att.data} className="w-full h-full object-cover" alt="Attachment preview" />
+              <button type="button" onClick={()=>setAtt(null)}
+                className="absolute top-1 right-1 w-5 h-5 rounded-full bg-slate-900/70 text-white flex items-center justify-center">
+                <Ico d={I.x} className="w-3 h-3"/>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="flex items-center gap-2 mt-2.5 ml-12 flex-wrap">
+        <Btn size="sm" variant="outline" icon={I.camera} type="button" disabled={!!att || imgBusy} onClick={()=>imgRef.current?.click()}>
+          {imgBusy ? "Adding…" : "Photo"}
+        </Btn>
+        <Btn size="sm" variant="outline" icon={I.doc} type="button" disabled={!!att} onClick={()=>pdfRef.current?.click()}>PDF</Btn>
+        <input ref={imgRef} type="file" accept="image/*" className="hidden" onChange={e=>pickImage(e.target.files?.[0])} />
+        <input ref={pdfRef} type="file" accept="application/pdf" className="hidden" onChange={e=>pickPdf(e.target.files?.[0])} />
+        <Btn size="sm" variant="primary" icon={I.send} className="ml-auto" onClick={post} disabled={busy}>
+          {busy ? <Spinner/> : null}Post
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+function NoticeCard({post, profile, toast, onView}){
+  const isAdmin = profile.role === "Admin";
+  const isOwner = post.created_by === profile.id;
+  const [busy, setBusy] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [delBusy, setDelBusy] = useState(false);
+
+  const setStatus = async (status) => {
+    setBusy(true);
+    const { error } = await sb.from("notice_board").update({status}).eq("id", post.id);
+    setBusy(false);
+    if (error) toast(friendlyError(error), true);
+  };
+  const doDelete = async () => {
+    setDelBusy(true);
+    const { error } = await sb.from("notice_board").delete().eq("id", post.id);
+    setDelBusy(false); setConfirmDel(false);
+    if (error) toast(friendlyError(error), true);
+  };
+
+  const canDelete = isAdmin || (isOwner && post.status === "Open");
+  const roleTone = r => r==="Admin"?"rose":r==="Maintenance"?"violet":r==="Host"?"teal":"slate";
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-3.5">
+      <div className="flex items-start gap-3">
+        <div className="w-9 h-9 rounded-full bg-slate-100 text-slate-700 grid place-items-center font-bold text-sm shrink-0">
+          {post.created_by_name.slice(0,1).toUpperCase()}
+        </div>
+        <div className="min-w-0 grow">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="font-semibold text-[13.5px] truncate">{post.created_by_name}</p>
+            <Badge tone={roleTone(post.created_by_role)}>{post.created_by_role}</Badge>
+            <span className="ml-auto text-[11px] text-slate-500 font-mono shrink-0">{fmtDateTime(post.created_at)}</span>
+          </div>
+          {post.message ? <p className="text-[13.5px] text-slate-800 whitespace-pre-wrap mt-1.5 leading-relaxed">{post.message}</p> : null}
+          <NoticeAttachment post={post} onView={onView} />
+          <div className="flex items-center gap-2 mt-2.5 flex-wrap">
+            {post.status === "Done"
+              ? <Badge tone="emerald">Done · {post.done_by_name} · {fmtDateTime(post.done_at)}</Badge>
+              : <Badge tone="amber">Open</Badge>}
+            {isAdmin && post.status === "Open" && (
+              <Btn size="sm" variant="ok" icon={I.check} onClick={()=>setStatus("Done")} disabled={busy}>
+                {busy?<Spinner/>:null}Mark done
+              </Btn>
+            )}
+            {isAdmin && post.status === "Done" && (
+              <Btn size="sm" variant="outline" onClick={()=>setStatus("Open")} disabled={busy}>
+                {busy?<Spinner/>:null}Reopen
+              </Btn>
+            )}
+            {canDelete && (
+              <Btn size="sm" variant="ghost" icon={I.x} className="ml-auto" onClick={()=>setConfirmDel(true)} title="Delete" />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {confirmDel && (
+        <div className="fixed inset-0 z-[70] bg-slate-900/40 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4"
+             onMouseDown={e=>{ if(e.target===e.currentTarget && !delBusy) setConfirmDel(false); }}>
+          <div className="bg-white border border-slate-200 w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl shadow-2xl">
+            <div className="px-5 py-4 border-b border-slate-200"><h3 className="font-semibold text-[15px]">Delete this notice?</h3></div>
+            <div className="px-5 py-4"><p className="text-[13.5px] text-slate-700">Yeh post hamesha ke liye hat jayegi.</p></div>
+            <div className="px-5 py-3.5 border-t border-slate-200 flex gap-2 justify-end">
+              <Btn variant="outline" onClick={()=>setConfirmDel(false)} disabled={delBusy}>Cancel</Btn>
+              <Btn variant="danger" onClick={doDelete} disabled={delBusy}>{delBusy?<Spinner/>:null}Delete</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NoticeBoard({profile, toast, onView}){
+  const [posts, setPosts] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async ()=>{
+    setLoading(true);
+    const { data, error } = await sb.from("notice_board").select("*").order("created_at", {ascending:false});
+    setLoading(false);
+    if (error) return toast(friendlyError(error), true);
+    setPosts(data || []);
+  },[toast]);
+  useEffect(()=>{ load(); },[load]);
+
+  // Live updates for everyone looking at the board — no polling, no manual refresh.
+  useEffect(()=>{
+    const channel = sb.channel("notice_board_live")
+      .on("postgres_changes", {event:"*", schema:"public", table:"notice_board"}, payload => {
+        setPosts(prev => {
+          if (payload.eventType === "INSERT"){
+            if (prev.some(p=>p.id===payload.new.id)) return prev;
+            return [payload.new, ...prev];
+          }
+          if (payload.eventType === "UPDATE") return prev.map(p => p.id===payload.new.id ? payload.new : p);
+          if (payload.eventType === "DELETE") return prev.filter(p => p.id !== payload.old.id);
+          return prev;
+        });
+      })
+      .subscribe();
+    return ()=>{ sb.removeChannel(channel); };
+  },[]);
+
+  return (
+    <div>
+      <div className="mb-4">
+        <h2 className="font-bold text-[17px]">Notice Board</h2>
+        <p className="text-[12.5px] text-slate-500">सूचना पट्ट &mdash; sabko dikhega, real-time</p>
+      </div>
+
+      <NoticeComposer profile={profile} toast={toast} />
+
+      {loading ? (
+        <div className="space-y-3">
+          {Array.from({length:3}).map((_,i)=>(
+            <div key={i} className="rounded-xl border border-slate-200 bg-white p-3.5">
+              <div className="h-3 rounded bg-slate-100 animate-pulse" style={{width:`${55+i*9}%`}} />
+            </div>
+          ))}
+        </div>
+      ) : posts.length === 0 ? (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-5 py-16 text-center">
+          <Ico d={I.doc} className="w-9 h-9 mx-auto text-slate-300 mb-3" />
+          <p className="font-semibold text-slate-700">Abhi koi notice nahi</p>
+          <p className="text-[13px] text-slate-500 mt-1">Sabse pehle aap likhein.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {posts.map(p => <NoticeCard key={p.id} post={p} profile={profile} toast={toast} onView={onView} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // 13. STATS STRIP
 // ============================================================
 function Stats({rows, profile}){
@@ -1453,17 +1877,21 @@ function App(){
     setRows((data||[]).map(r => ({...r, photo_count: r.photo_count?.[0]?.count ?? 0})));
   },[toast]);
 
+  const loadMachines = useCallback(async ()=>{
+    const { data, error } = await sb.from("machine_list").select("machine_name,machine_no,department").eq("is_active",true)
+      .order("department").order("machine_name").order("machine_no");
+    if (!error) setMachines(data||[]);
+  },[]);
+
   useEffect(()=>{
     if (!profile) return;
     loadRows(true);
-    sb.from("machine_list").select("machine_name,machine_no,department").eq("is_active",true)
-      .order("department").order("machine_name").order("machine_no")
-      .then(({data}) => setMachines(data||[]));
+    loadMachines();
     const iv = setInterval(()=>{
       if (document.visibilityState === "visible" && !detail && !showNew) loadRows(false);
     }, 60000);
     return ()=> clearInterval(iv);
-  },[profile, loadRows]);   // eslint-disable-line
+  },[profile, loadRows, loadMachines]);   // eslint-disable-line
 
   // Keep the open detail in sync with refreshed data
   useEffect(()=>{
@@ -1509,6 +1937,12 @@ function App(){
     profile.role === "Host" ? `${(profile.host_types||[]).join(", ")} complaints` :
     "Sirf aapki complaints";
 
+  const navItems = [
+    { key:"complaints", label:"Complaints" },
+    { key:"notices", label:"Notice Board" },
+    ...(profile.role === "Admin" ? [{ key:"machines", label:"Machines" }, { key:"users", label:"Users" }] : []),
+  ];
+
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-40 bg-white/95 backdrop-blur border-b border-slate-200">
@@ -1518,18 +1952,14 @@ function App(){
             <h1 className="font-bold text-[15px] leading-tight truncate">Machine Complaint Register</h1>
             <p className="text-[11.5px] text-slate-500 truncate">{profile.name} · {profile.role} · {scopeLine}</p>
           </div>
-          {profile.role === "Admin" && (
-            <div className="flex rounded-lg border border-slate-200 overflow-hidden shrink-0">
-              <button onClick={()=>setView("complaints")}
-                className={`px-3 py-2 text-[12.5px] font-medium ${view==="complaints"?"bg-slate-100 text-slate-900":"text-slate-500 hover:text-slate-800"}`}>
-                Complaints
+          <div className="flex rounded-lg border border-slate-200 overflow-hidden shrink-0 flex-wrap">
+            {navItems.map(n => (
+              <button key={n.key} onClick={()=>setView(n.key)}
+                className={`px-3 py-2 text-[12.5px] font-medium ${view===n.key?"bg-slate-100 text-slate-900":"text-slate-500 hover:text-slate-800"}`}>
+                {n.label}
               </button>
-              <button onClick={()=>setView("users")}
-                className={`px-3 py-2 text-[12.5px] font-medium ${view==="users"?"bg-slate-100 text-slate-900":"text-slate-500 hover:text-slate-800"}`}>
-                Users
-              </button>
-            </div>
-          )}
+            ))}
+          </div>
           <Btn variant="primary" icon={I.plus} onClick={()=>setShowNew(true)} className="shrink-0">
             <span className="hidden sm:inline">New Complaint</span><span className="sm:hidden">New</span>
           </Btn>
@@ -1538,13 +1968,19 @@ function App(){
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-5">
-        {view === "users" && profile.role === "Admin"
-          ? <AdminUsers profile={profile} toast={toast} callAdmin={callAdmin} />
-          : <>
-              <Stats rows={rows} profile={profile} />
-              <ComplaintsView profile={profile} rows={rows} loading={loading}
-                onRefresh={()=>loadRows(true)} onOpen={setDetail} toast={toast} />
-            </>}
+        {view === "users" && profile.role === "Admin" ? (
+          <AdminUsers profile={profile} toast={toast} callAdmin={callAdmin} />
+        ) : view === "machines" && profile.role === "Admin" ? (
+          <AdminMachines toast={toast} onMachinesChanged={loadMachines} />
+        ) : view === "notices" ? (
+          <NoticeBoard profile={profile} toast={toast} onView={setLightbox} />
+        ) : (
+          <>
+            <Stats rows={rows} profile={profile} />
+            <ComplaintsView profile={profile} rows={rows} loading={loading}
+              onRefresh={()=>loadRows(true)} onOpen={setDetail} toast={toast} />
+          </>
+        )}
       </main>
 
       {showNew && (
