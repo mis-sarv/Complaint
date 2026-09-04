@@ -413,6 +413,7 @@ const I = {
   wifi:'<path d="M5 12.5c2.5-3 6.5-5 12-5"/><path d="M8 16c1.5-2 4-3.5 8-3.5"/><circle cx="14" cy="19" r="1.2" fill="currentColor" stroke="none"/>',
   wifiOff:'<path d="M5 12.5c2.5-3 6.5-5 12-5"/><path d="M2 2l20 20"/><circle cx="14" cy="19" r="1.2" fill="currentColor" stroke="none"/>',
   signal:'<path d="M2 20h2V14h-2zM7 20h2V10H7zM12 20h2V6h-2zM17 20h2V2h-2z"/>',
+  scan:'<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/><path d="M7 8h2"/><path d="M7 16h2"/><path d="M15 8h2"/><path d="M15 16h2"/>',
 };
 
 // ============================================================
@@ -512,6 +513,142 @@ function Modal({title, subtitle, onClose, children, footer, wide}){
         </div>
         <div className="px-5 py-4 overflow-y-auto grow">{children}</div>
         {footer ? <div className="px-5 py-3.5 border-t border-slate-200 flex gap-2 justify-end shrink-0">{footer}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 5B. BARCODE SCANNER — uses device camera to scan machine no barcodes.
+//     Falls back to manual text entry if BarcodeDetector is unsupported.
+//     Works on Chrome Android 83+, Chrome Desktop 83+, Edge, Samsung Internet.
+// ============================================================
+function BarcodeScannerModal({onResult, onClose}){
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const [err, setErr] = useState("");
+  const [manualMode, setManualMode] = useState(false);
+  const [manualVal, setManualVal] = useState("");
+  const scanningRef = useRef(true);
+
+  // Check if BarcodeDetector API is available
+  const hasBarcodeAPI = typeof window.BarcodeDetector !== "undefined";
+
+  useEffect(()=>{
+    if (manualMode || !hasBarcodeAPI) return;
+    let detector;
+    let animFrame;
+
+    const startCamera = async () => {
+      try {
+        detector = new BarcodeDetector({ formats: ["code_128","code_39","ean_13","ean_8","qr_code","upc_a","upc_e","itf","codabar"] });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
+        });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play();
+        }
+
+        const scan = async () => {
+          if (!scanningRef.current || !videoRef.current) return;
+          try {
+            const barcodes = await detector.detect(videoRef.current);
+            if (barcodes.length > 0 && scanningRef.current) {
+              scanningRef.current = false;
+              const code = barcodes[0].rawValue.trim();
+              // Vibrate feedback
+              try { navigator.vibrate && navigator.vibrate(200); } catch(e){}
+              onResult(code);
+              return; // don't schedule next frame
+            }
+          } catch(e) { /* detection can fail on blank frames — ignore */ }
+          animFrame = requestAnimationFrame(scan);
+        };
+        // Wait for video to be ready then start scanning
+        videoRef.current.onloadeddata = () => { animFrame = requestAnimationFrame(scan); };
+      } catch(e) {
+        setErr("Camera open nahi ho paaya. Manual mode use karein.");
+        setManualMode(true);
+      }
+    };
+    startCamera();
+
+    return () => {
+      scanningRef.current = false;
+      cancelAnimationFrame(animFrame);
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+    };
+  },[manualMode, hasBarcodeAPI]); // eslint-disable-line
+
+  // Cleanup stream on close
+  useEffect(()=> () => {
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+  },[]);
+
+  const submitManual = () => {
+    const v = manualVal.trim();
+    if (v) onResult(v);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={e=>{if(e.target===e.currentTarget) onClose();}}>
+      <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-200">
+          <Ico d={I.scan} className="w-5 h-5 text-teal-600" />
+          <h3 className="font-semibold text-[15px]">Scan Machine No</h3>
+          <span className="text-[11px] text-slate-500">बारकोड स्कैन</span>
+          <Btn size="sm" icon={I.x} onClick={onClose} className="ml-auto" />
+        </div>
+
+        {(!manualMode && hasBarcodeAPI) ? (
+          <div className="relative bg-black">
+            <video ref={videoRef} className="w-full h-56 object-cover" muted playsInline />
+            {/* Scan guide overlay */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="w-3/4 h-16 border-2 border-teal-400/80 rounded-lg" />
+            </div>
+            <p className="absolute bottom-2 left-0 right-0 text-center text-white/80 text-[11px]">
+              Barcode ko box ke andar rakho
+            </p>
+          </div>
+        ) : null}
+
+        <div className="p-4 space-y-3">
+          {err && <p className="text-[12px] text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{err}</p>}
+
+          {!hasBarcodeAPI && !manualMode && (
+            <div className="text-center py-2">
+              <p className="text-[13px] text-slate-600 mb-2">Yeh browser barcode scan support nahi karta.</p>
+              <p className="text-[12px] text-slate-500">Manual mode use karein ya Chrome Android try karein.</p>
+            </div>
+          )}
+
+          {/* Manual entry — always available as fallback */}
+          <div>
+            {(!manualMode && hasBarcodeAPI) && (
+              <button onClick={()=>setManualMode(true)} className="text-[12px] text-teal-600 hover:underline mb-2">
+                Manually type karein?
+              </button>
+            )}
+            {(manualMode || !hasBarcodeAPI) && (
+              <div className="flex gap-2">
+                <input className={inputCls(false)+" flex-1"} value={manualVal} onChange={e=>setManualVal(e.target.value)}
+                  placeholder="Machine no type karein…" autoFocus
+                  onKeyDown={e=>{ if(e.key==="Enter") submitManual(); }} />
+                <Btn variant="primary" size="sm" onClick={submitManual} disabled={!manualVal.trim()}>Done</Btn>
+              </div>
+            )}
+          </div>
+
+          {(!manualMode && hasBarcodeAPI) && (
+            <p className="text-[11px] text-slate-400 text-center">Camera se scan ho raha hai… ya manual type karein</p>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -958,6 +1095,7 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
   const [photos, setPhotos] = useState([]);
   const [errs, setErrs] = useState({});
   const [busy, setBusy] = useState(false);
+  const [showScan, setShowScan] = useState(false);
   // Shown as the auto-stamped "Date of problem" — the real value is set by the
   // database trigger at insert time (mc_stamp_owner), so this is a display-only
   // clock, not the value that gets saved. Frozen at mount so it doesn't tick.
@@ -970,6 +1108,18 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
     if (val === "Other"){ setF(s=>({...s, machine_pick:"Other", machine_no:"", other_machine_name:""})); return; }
     const [nm, no] = val.split("||");
     setF(s=>({...s, machine_pick:val, machine_no:no||"", other_machine_name:""}));
+  };
+
+  // Barcode scan result → auto-match machine from list
+  const handleScanResult = (code) => {
+    setShowScan(false);
+    const match = machines.find(m => m.machine_no && m.machine_no.trim().toLowerCase() === code.trim().toLowerCase());
+    if (match) {
+      pickMachine(`${match.machine_name}||${match.machine_no}`);
+    } else {
+      // No match — set machine_no, keep current pick or switch to Other
+      setF(s => ({...s, machine_no: code.trim()}));
+    }
   };
 
   const save = async () => {
@@ -1053,11 +1203,20 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
                    onChange={e=>set("other_machine_name", e.target.value)} placeholder="Machine ka naam" />
           </Field>
         )}
-        <Field label="Machine no" hindi="मशीन नंबर">
-          <input className={inputCls(false)} value={f.machine_no}
-                 onChange={e=>set("machine_no", e.target.value)} placeholder="e.g. KM-04" />
+        <Field label="Machine no" hindi="मशीन नंबर · स्कैन / टाइप">
+          <div className="flex gap-2">
+            <input className={inputCls(false)+" flex-1"} value={f.machine_no}
+                   onChange={e=>set("machine_no", e.target.value)} placeholder="e.g. KM-04" />
+            <button type="button" onClick={()=>setShowScan(true)}
+              className="shrink-0 w-10 h-10 rounded-lg bg-teal-500/10 text-teal-600 hover:bg-teal-500/20 transition grid place-items-center"
+              title="Barcode scan karein">
+              <Ico d={I.scan} className="w-5 h-5" />
+            </button>
+          </div>
         </Field>
       </div>
+
+      {showScan && <BarcodeScannerModal onResult={handleScanResult} onClose={()=>setShowScan(false)} />}
 
       <Field label="Describe problem" hindi="शिकायत का विवरण" required error={errs.problem_desc}>
         <textarea className={inputCls(errs.problem_desc)+" min-h-[90px] resize-y"} value={f.problem_desc}
@@ -1848,6 +2007,7 @@ function MachineFormModal({editing, onClose, onSaved, toast}){
   });
   const [errs, setErrs] = useState({});
   const [busy, setBusy] = useState(false);
+  const [showScan, setShowScan] = useState(false);
   const set = (k,v) => setF(s => ({...s, [k]:v}));
 
   const save = async () => {
@@ -1881,10 +2041,18 @@ function MachineFormModal({editing, onClose, onSaved, toast}){
         <input className={inputCls(errs.machine_name)} value={f.machine_name}
                onChange={e=>set("machine_name", e.target.value)} placeholder="Circular Knitting Machine" />
       </Field>
-      <Field label="Machine no" hindi="मशीन नंबर" required error={errs.machine_no}>
-        <input className={inputCls(errs.machine_no)} value={f.machine_no}
-               onChange={e=>set("machine_no", e.target.value)} placeholder="KM-05" />
+      <Field label="Machine no" hindi="मशीन नंबर · स्कैन / टाइप" required error={errs.machine_no}>
+        <div className="flex gap-2">
+          <input className={inputCls(errs.machine_no)+" flex-1"} value={f.machine_no}
+                 onChange={e=>set("machine_no", e.target.value)} placeholder="KM-05" />
+          <button type="button" onClick={()=>setShowScan(true)}
+            className="shrink-0 w-10 h-10 rounded-lg bg-teal-500/10 text-teal-600 hover:bg-teal-500/20 transition grid place-items-center"
+            title="Barcode scan karein">
+            <Ico d={I.scan} className="w-5 h-5" />
+          </button>
+        </div>
       </Field>
+      {showScan && <BarcodeScannerModal onResult={(code)=>{ setShowScan(false); set("machine_no", code.trim()); }} onClose={()=>setShowScan(false)} />}
       <Field label="Department" hindi="विभाग" required>
         <select className={inputCls(false)} value={f.department} onChange={e=>set("department", e.target.value)}>
           {DEPARTMENTS.map(d=><option key={d} value={d}>{d}</option>)}
