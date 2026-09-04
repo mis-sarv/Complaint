@@ -296,6 +296,89 @@ async function sendPushToUser(targetUserId, taskDesc, message) {
 }
 
 // ============================================================
+// 3c. PRESENCE — heartbeat last_online_at every 60s
+// ============================================================
+let _presenceTimer = null;
+function startPresence(userId) {
+  if (_presenceTimer) return;
+  const beat = () => sb.from("profiles").update({ last_online_at: new Date().toISOString() }).eq("id", userId).then(()=>{});
+  beat();
+  _presenceTimer = setInterval(beat, 60000);
+}
+function stopPresence() { clearInterval(_presenceTimer); _presenceTimer = null; }
+
+// ============================================================
+// 3d. TAB BADGE — track last-seen per section in user_tab_seen
+// ============================================================
+// Upsert the timestamp when user opens a tab or sub-tab.
+async function markTabSeen(tabKey) {
+  try {
+    const { data:{ session:s } } = await sb.auth.getSession();
+    if (!s) return;
+    await sb.from("user_tab_seen").upsert(
+      { user_id: s.user.id, tab_key: tabKey, seen_at: new Date().toISOString() },
+      { onConflict: "user_id,tab_key" }
+    );
+  } catch(e) { /* ignore */ }
+}
+
+// Hook: load all tab_seen rows for the logged-in user.
+function useTabSeen(userId) {
+  const [map, setMap] = useState({});
+  const load = useCallback(async () => {
+    if (!userId) return;
+    const { data } = await sb.from("user_tab_seen").select("tab_key,seen_at").eq("user_id", userId);
+    if (data) {
+      const m = {};
+      data.forEach(r => m[r.tab_key] = r.seen_at);
+      setMap(m);
+    }
+  }, [userId]);
+  useEffect(() => { load(); }, [load]);
+  return [map, load];
+}
+
+// ============================================================
+// 3e. SWIPE HOOK — detect horizontal swipe on a container ref
+// ============================================================
+function useSwipe(onLeft, onRight) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let startX = 0, startY = 0, tracking = false;
+    const onStart = e => {
+      const t = e.touches ? e.touches[0] : e;
+      startX = t.clientX; startY = t.clientY; tracking = true;
+    };
+    const onEnd = e => {
+      if (!tracking) return;
+      tracking = false;
+      const t = e.changedTouches ? e.changedTouches[0] : e;
+      const dx = t.clientX - startX, dy = t.clientY - startY;
+      if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx) * 0.6) return; // too short or too vertical
+      if (dx < 0) onLeft(); else onRight();
+    };
+    el.addEventListener("touchstart", onStart, { passive: true });
+    el.addEventListener("touchend", onEnd, { passive: true });
+    return () => { el.removeEventListener("touchstart", onStart); el.removeEventListener("touchend", onEnd); };
+  });
+  return ref;
+}
+
+// ============================================================
+// 3f. BLUE TICK — mark complaint as seen by host
+// ============================================================
+async function markComplaintSeen(complaintId) {
+  try {
+    await sb.from("machine_complaints")
+      .update({ seen_by_host_at: new Date().toISOString() })
+      .eq("id", complaintId)
+      .is("seen_by_host_at", null);
+  } catch(e) { /* ignore */ }
+}
+
+// ============================================================
 // 4. ICONS (inline SVG — no extra CDN, no post-render DOM scan)
 // ============================================================
 const Ico = ({d, className="w-4 h-4", fill="none", stroke=1.8}) => (
@@ -326,6 +409,10 @@ const I = {
   calendar:'<rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M16 3v3M8 3v3M3 9.5h18"/>',
   trash:'<path d="M4 7h16"/><path d="M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/>',
   bell:'<path d="M6 8a6 6 0 0 1 12 0c0 4.5 1.5 6 2 6.5H4c.5-.5 2-2 2-6.5Z"/><path d="M10 19a2 2 0 0 0 4 0"/>',
+  checkCheck:'<path d="m2 13 4 4L16 7"/><path d="m8 13 4 4L22 7"/>',
+  wifi:'<path d="M5 12.5c2.5-3 6.5-5 12-5"/><path d="M8 16c1.5-2 4-3.5 8-3.5"/><circle cx="14" cy="19" r="1.2" fill="currentColor" stroke="none"/>',
+  wifiOff:'<path d="M5 12.5c2.5-3 6.5-5 12-5"/><path d="M2 2l20 20"/><circle cx="14" cy="19" r="1.2" fill="currentColor" stroke="none"/>',
+  signal:'<path d="M2 20h2V14h-2zM7 20h2V10H7zM12 20h2V6h-2zM17 20h2V2h-2z"/>',
 };
 
 // ============================================================
@@ -1017,12 +1104,12 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
     ((profile.role === "Host" || profile.role === "Maintenance") &&
       (profile.role === "Maintenance" || (profile.host_types||[]).includes(c.complaint_type)));
   const canHostAct = isHostHere && profile.role !== "User";
-  // Admin can delete any complaint. The raiser can delete their own only
-  // while it is still Pending — once a Host has started work (In Progress),
-  // deleting it would erase evidence of time already spent; the DB's
-  // mc_delete_owner_pending RLS policy enforces this exact rule too, so a
-  // direct API call can't bypass it even if this button were hidden/faked.
   const canDelete = profile.role === "Admin" || (isOwner && c.status === "Pending");
+
+  // 🔵 Blue tick — when host/admin opens a complaint, mark it as seen
+  useEffect(() => {
+    if (canHostAct && !c.seen_by_host_at) markComplaintSeen(c.id);
+  }, [c.id]); // eslint-disable-line
 
   useEffect(()=>{
     let alive = true;
@@ -1298,9 +1385,11 @@ function ComplaintRow({c, profile, onOpen}){
   const needsMe =
     (c.status === "Completed" && c.raised_by_user_id === profile.id) ||
     (c.status === "Pending" && profile.role !== "User");
+  // Blue double-tick: complaint raiser sees it when host has opened the complaint
+  const showBlueTick = c.seen_by_host_at && c.raised_by_user_id === profile.id;
   return (
     <button onClick={()=>onOpen(c)}
-      className="w-full text-left px-4 py-3.5 hover:bg-slate-100 transition-colors border-l-2 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4"
+      className="w-full text-left px-4 py-3.5 hover:bg-slate-100 transition-colors border-l-[3px] flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4"
       style={{borderLeftColor: c.status==="Closed" ? "#10b981" : isDown(c) ? "#f43f5e" : c.status==="In Progress" ? "#14b8a6" : c.status==="Completed" ? "#a78bfa" : "#f59e0b"}}>
       <div className="sm:w-24 shrink-0">
         <p className="font-mono text-[11.5px] text-slate-500">{c.complaint_no}</p>
@@ -1324,6 +1413,7 @@ function ComplaintRow({c, profile, onOpen}){
         </div>
       ) : null}
       <div className="shrink-0 flex items-center gap-2">
+        {showBlueTick && <Ico d={I.checkCheck} className="w-4 h-4 text-blue-500" title="Host ne dekh liya" />}
         {needsMe ? <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" title="Needs your action" /> : null}
         <StatusBadge c={c} />
       </div>
@@ -1331,16 +1421,31 @@ function ComplaintRow({c, profile, onOpen}){
   );
 }
 
-function ComplaintsView({profile, rows, loading, onRefresh, onOpen, toast}){
+function ComplaintsView({profile, rows, loading, onRefresh, onOpen, toast, tabSeenMap, onTabSeenRefresh}){
   const [tab, setTab] = useState("Pending");
   const [q, setQ] = useState("");
   const [type, setType] = useState("All");
+
+  // Mark sub-tab as seen when user switches to it
+  const switchTab = (key) => { setTab(key); markTabSeen("complaints:" + key); if (onTabSeenRefresh) onTabSeenRefresh(); };
+  useEffect(() => { markTabSeen("complaints:" + tab); }, []); // eslint-disable-line
 
   const counts = useMemo(()=>{
     const o = {};
     TABS.forEach(t => o[t.key] = rows.filter(r => t.statuses.includes(r.status)).length);
     return o;
   },[rows]);
+
+  // Unseen count per sub-tab: items created_at > last seen time for that sub-tab
+  const unseenCounts = useMemo(()=>{
+    const o = {};
+    TABS.forEach(t => {
+      const lastSeen = tabSeenMap?.["complaints:" + t.key];
+      if (!lastSeen) { o[t.key] = rows.filter(r => t.statuses.includes(r.status)).length; return; }
+      o[t.key] = rows.filter(r => t.statuses.includes(r.status) && r.updated_at > lastSeen).length;
+    });
+    return o;
+  },[rows, tabSeenMap]);
 
   const shown = useMemo(()=>{
     const tabDef = TABS.find(t => t.key === tab);
@@ -1357,20 +1462,42 @@ function ComplaintsView({profile, rows, loading, onRefresh, onOpen, toast}){
     });
   },[rows, tab, q, type]);
 
+  // Swipe to switch sub-tabs
+  const tabKeys = TABS.map(t=>t.key);
+  const swipeRef = useSwipe(
+    () => { const i = tabKeys.indexOf(tab); if (i < tabKeys.length-1) switchTab(tabKeys[i+1]); },
+    () => { const i = tabKeys.indexOf(tab); if (i > 0) switchTab(tabKeys[i-1]); }
+  );
+
+  // Tab colors per status
+  const tabColors = { "Pending": { active:"bg-amber-500/15 border-amber-500/60 text-amber-800", dot:"bg-amber-500" },
+                      "In Progress": { active:"bg-teal-500/15 border-teal-500/60 text-teal-800", dot:"bg-teal-500" },
+                      "Completed": { active:"bg-violet-500/15 border-violet-500/60 text-violet-800", dot:"bg-violet-500" } };
+
   return (
-    <div>
+    <div ref={swipeRef}>
       {/* Tabs */}
       <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
-        {TABS.map(t => (
-          <button key={t.key} onClick={()=>setTab(t.key)}
-            className={`shrink-0 rounded-xl px-4 py-2.5 text-left transition-colors border ${
-              tab===t.key ? "bg-teal-500/15 border-teal-500/50" : "bg-white border-slate-200 hover:border-slate-300"}`}>
-            <span className={`block text-[13px] font-semibold ${tab===t.key?"text-teal-800":"text-slate-700"}`}>
-              {t.label} <span className="font-mono text-[11.5px] opacity-70">{counts[t.key]}</span>
-            </span>
-            <span className="block text-[11px] text-slate-500">{t.hi}</span>
-          </button>
-        ))}
+        {TABS.map(t => {
+          const tc = tabColors[t.key] || tabColors["Pending"];
+          const isActive = tab === t.key;
+          const unseen = unseenCounts[t.key] || 0;
+          return (
+            <button key={t.key} onClick={()=>switchTab(t.key)}
+              className={`shrink-0 rounded-xl px-4 py-2.5 text-left transition-all border relative ${
+                isActive ? tc.active : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"}`}>
+              {unseen > 0 && !isActive && (
+                <span className={`absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full ${tc.dot} text-white text-[10px] font-bold flex items-center justify-center px-1 shadow-sm`}>
+                  {unseen > 99 ? "99+" : unseen}
+                </span>
+              )}
+              <span className={`block text-[13px] font-semibold`}>
+                {t.label} <span className="font-mono text-[11.5px] opacity-70">{counts[t.key]}</span>
+              </span>
+              <span className="block text-[11px] text-slate-500">{t.hi}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Filters */}
@@ -1400,7 +1527,7 @@ function ComplaintsView({profile, rows, loading, onRefresh, onOpen, toast}){
               {tab === "Pending" ? "Koi pending complaint nahi" : tab === "In Progress" ? "Kuch chal nahi raha" : "Abhi kuch complete nahi hua"}
             </p>
             <p className="text-[13px] text-slate-500 mt-1">
-              {rows.length ? "Filter ya search clear karke dekhein." : "Nayi complaint “New Complaint” se log karein."}
+              {rows.length ? "Filter ya search clear karke dekhein." : 'Nayi complaint "New Complaint" se log karein.'}
             </p>
           </div>
         ) : shown.map(c => <ComplaintRow key={c.id} c={c} profile={profile} onOpen={onOpen} />)}
@@ -2347,6 +2474,120 @@ function TaskRow({t, onOpen}){
   );
 }
 
+// Ring Alarm section with delivery status (online/offline, push sent, ring received)
+function RingAlarmSection({t, ringMsg, setRingMsg, ringAlarm, ringBusy, ringSent}){
+  const [doerStatus, setDoerStatus] = useState(null); // {online, lastSeen}
+  const [reminders, setReminders] = useState([]);
+
+  // Fetch doer's last_online_at + recent reminders for this task
+  useEffect(()=>{
+    let alive = true;
+    (async()=>{
+      const [profRes, remRes] = await Promise.all([
+        sb.from("profiles").select("last_online_at").eq("id", t.assigned_to).maybeSingle(),
+        sb.from("task_reminders").select("id,sent_at,acknowledged_at,received_at").eq("task_id", t.id).order("sent_at",{ascending:false}).limit(5),
+      ]);
+      if (!alive) return;
+      if (profRes.data){
+        const last = profRes.data.last_online_at;
+        const online = last && (Date.now() - new Date(last).getTime()) < 90000; // 90s threshold
+        setDoerStatus({online, lastSeen: last});
+      }
+      if (remRes.data) setReminders(remRes.data);
+    })();
+    return ()=>{ alive = false; };
+  },[t.id, t.assigned_to, ringSent]); // re-fetch after sending ring
+
+  // Live-update reminders when received_at or acknowledged_at changes
+  useEffect(()=>{
+    const ch = sb.channel(`ring_status_${t.id}`)
+      .on("postgres_changes", {event:"UPDATE", schema:"public", table:"task_reminders", filter:`task_id=eq.${t.id}`},
+        payload => { setReminders(prev => prev.map(r => r.id===payload.new.id ? {...r, ...payload.new} : r)); })
+      .subscribe();
+    return ()=>{ sb.removeChannel(ch); };
+  },[t.id]);
+
+  const fmtAgo = (iso) => {
+    if (!iso) return "—";
+    const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (sec < 60) return "abhi abhi";
+    if (sec < 3600) return Math.floor(sec/60) + " min pehle";
+    if (sec < 86400) return Math.floor(sec/3600) + " hrs pehle";
+    return Math.floor(sec/86400) + " din pehle";
+  };
+
+  return (
+    <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 mb-4">
+      <p className="text-[11px] uppercase tracking-wide text-amber-700 font-semibold mb-2 flex items-center gap-1.5">
+        <Ico d={I.bell} className="w-3.5 h-3.5" /> Ring alarm — doer ke device par
+      </p>
+
+      {/* Doer status indicator */}
+      <div className="flex items-center gap-3 mb-3 flex-wrap">
+        <div className="flex items-center gap-1.5">
+          <span className={`w-2.5 h-2.5 rounded-full ${doerStatus?.online ? "bg-emerald-500 animate-pulse" : "bg-slate-400"}`} />
+          <span className="text-[12.5px] font-medium text-slate-700">
+            {t.assigned_to_name}: {doerStatus?.online ? "Online" : "Offline"}
+          </span>
+        </div>
+        {doerStatus && !doerStatus.online && doerStatus.lastSeen && (
+          <span className="text-[11px] text-slate-500">Last seen: {fmtAgo(doerStatus.lastSeen)}</span>
+        )}
+      </div>
+
+      <p className="text-[12px] text-slate-500 mb-2.5">
+        Ring bhejne par — in-app alarm + push notification dono jaayenge. Browser band ho tab bhi push notification aayega.
+      </p>
+
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        <input className={inputCls(false)+" flex-1 min-w-[160px]"} value={ringMsg}
+               onChange={e=>setRingMsg(e.target.value)} placeholder="Message (optional)…" />
+        <Btn size="sm" variant="primary" icon={I.bell} onClick={ringAlarm} disabled={ringBusy}>
+          {ringBusy?<Spinner/>:null}{ringSent ? "Bhej diya" : "Ring alarm"}
+        </Btn>
+      </div>
+
+      {/* Recent ring delivery status */}
+      {reminders.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[10.5px] uppercase tracking-wide text-slate-500">Recent rings — delivery status</p>
+          {reminders.map(r => (
+            <div key={r.id} className="flex items-center gap-2 text-[12px] bg-white/60 rounded-lg px-3 py-1.5 flex-wrap">
+              <span className="text-slate-500 shrink-0">{fmtDateTime(r.sent_at)}</span>
+              <span className="flex items-center gap-1">
+                <Ico d={I.send} className="w-3 h-3 text-slate-400" />
+                <span className="text-slate-600">Sent</span>
+              </span>
+              {r.received_at ? (
+                <span className="flex items-center gap-1 text-emerald-700">
+                  <Ico d={I.wifi} className="w-3 h-3" />
+                  <span>Device pe mila</span>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-slate-400">
+                  <Ico d={I.wifiOff} className="w-3 h-3" />
+                  <span>Device pe abhi nahi mila</span>
+                </span>
+              )}
+              {r.acknowledged_at ? (
+                <span className="flex items-center gap-1 text-teal-700 font-semibold">
+                  <Ico d={I.check} className="w-3 h-3" />
+                  <span>Dekh liya</span>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-amber-600">
+                  <Ico d={I.clock} className="w-3 h-3" />
+                  <span>Pending</span>
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
   const t = task;
   const isAdmin = profile.role === "Admin";
@@ -2462,22 +2703,7 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
       )}
 
       {isAdmin && t.status !== "Completed" && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 mb-4">
-          <p className="text-[11px] uppercase tracking-wide text-amber-700 font-semibold mb-2 flex items-center gap-1.5">
-            <Ico d={I.bell} className="w-3.5 h-3.5" /> Ring alarm — doer ke device par
-          </p>
-          <p className="text-[12px] text-slate-500 mb-2.5">
-            Doer ka app khula hona chahiye (background tab bhi chalega) — turant sound + alert dikhega.
-            Band app ya band phone par nahi jaayega, kyunki yeh ek plain web app hai (koi push server nahi).
-          </p>
-          <div className="flex items-center gap-2 flex-wrap">
-            <input className={inputCls(false)+" flex-1 min-w-[160px]"} value={ringMsg}
-                   onChange={e=>setRingMsg(e.target.value)} placeholder="Message (optional)…" />
-            <Btn size="sm" variant="primary" icon={I.bell} onClick={ringAlarm} disabled={ringBusy}>
-              {ringBusy?<Spinner/>:null}{ringSent ? "Bhej diya ✓" : "Ring alarm"}
-            </Btn>
-          </div>
-        </div>
+        <RingAlarmSection t={t} ringMsg={ringMsg} setRingMsg={setRingMsg} ringAlarm={ringAlarm} ringBusy={ringBusy} ringSent={ringSent} />
       )}
 
       {t.status === "Completed" && (
@@ -2594,7 +2820,7 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
 
 // Both the Admin's full board and everyone's "My Tasks" view share this list
 // engine — realtime-subscribed, filterable, tabbed by stage.
-function TaskList({profile, doers, scope, toast}){
+function TaskList({profile, doers, scope, toast, tabSeenMap, onTabSeenRefresh}){
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [stage, setStage] = useState("Assigned");
@@ -2642,9 +2868,24 @@ function TaskList({profile, doers, scope, toast}){
     if (!fresh) setOpenTask(null);
   },[tasks]);   // eslint-disable-line
 
+  // Mark current sub-tab as seen on mount
+  const switchStage = (key) => { setStage(key); markTabSeen("tasks:" + key); if (onTabSeenRefresh) onTabSeenRefresh(); };
+  useEffect(() => { markTabSeen("tasks:" + stage); }, []); // eslint-disable-line
+
   const counts = useMemo(()=>{
     const o = {}; TASK_STAGES.forEach(s => o[s.key] = tasks.filter(t=>t.status===s.key).length); return o;
   },[tasks]);
+
+  // Unseen count per sub-tab
+  const unseenCounts = useMemo(()=>{
+    const o = {};
+    TASK_STAGES.forEach(s => {
+      const lastSeen = tabSeenMap?.["tasks:" + s.key];
+      if (!lastSeen) { o[s.key] = tasks.filter(t=>t.status===s.key).length; return; }
+      o[s.key] = tasks.filter(t => t.status===s.key && t.updated_at > lastSeen).length;
+    });
+    return o;
+  },[tasks, tabSeenMap]);
 
   const shown = useMemo(()=>{
     const n = q.trim().toLowerCase();
@@ -2656,8 +2897,22 @@ function TaskList({profile, doers, scope, toast}){
     }).sort((a,b) => (a.planned_date||"").localeCompare(b.planned_date||""));
   },[tasks, stage, q, doerF]);
 
+  // Swipe to switch sub-tabs
+  const stageKeys = TASK_STAGES.map(s=>s.key);
+  const swipeRef = useSwipe(
+    () => { const i = stageKeys.indexOf(stage); if (i < stageKeys.length-1) switchStage(stageKeys[i+1]); },
+    () => { const i = stageKeys.indexOf(stage); if (i > 0) switchStage(stageKeys[i-1]); }
+  );
+
+  // Stage tab colors
+  const stageColors = {
+    "Pending Confirmation": { active:"bg-violet-500/15 border-violet-500/60 text-violet-800", dot:"bg-violet-500" },
+    "Assigned":            { active:"bg-teal-500/15 border-teal-500/60 text-teal-800", dot:"bg-teal-500" },
+    "Completed":           { active:"bg-emerald-500/15 border-emerald-500/60 text-emerald-800", dot:"bg-emerald-500" },
+  };
+
   return (
-    <div>
+    <div ref={swipeRef}>
       <div className="flex items-center gap-2 mb-4 flex-wrap">
         <div>
           <h2 className="font-bold text-[17px]">{scope==="mine" ? "My Tasks" : "All Tasks"}</h2>
@@ -2669,16 +2924,26 @@ function TaskList({profile, doers, scope, toast}){
       </div>
 
       <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
-        {TASK_STAGES.map(s => (
-          <button key={s.key} onClick={()=>setStage(s.key)}
-            className={`shrink-0 rounded-xl px-4 py-2.5 text-left transition-colors border ${
-              stage===s.key ? "bg-teal-500/15 border-teal-500/50" : "bg-white border-slate-200 hover:border-slate-300"}`}>
-            <span className={`block text-[13px] font-semibold ${stage===s.key?"text-teal-800":"text-slate-700"}`}>
-              {s.label} <span className="font-mono text-[11.5px] opacity-70">{counts[s.key]||0}</span>
-            </span>
-            <span className="block text-[11px] text-slate-500">{s.hi}</span>
-          </button>
-        ))}
+        {TASK_STAGES.map(s => {
+          const sc = stageColors[s.key] || stageColors["Assigned"];
+          const isActive = stage === s.key;
+          const unseen = unseenCounts[s.key] || 0;
+          return (
+            <button key={s.key} onClick={()=>switchStage(s.key)}
+              className={`shrink-0 rounded-xl px-4 py-2.5 text-left transition-all border relative ${
+                isActive ? sc.active : "bg-white border-slate-200 hover:border-slate-300 text-slate-700"}`}>
+              {unseen > 0 && !isActive && (
+                <span className={`absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full ${sc.dot} text-white text-[10px] font-bold flex items-center justify-center px-1 shadow-sm`}>
+                  {unseen > 99 ? "99+" : unseen}
+                </span>
+              )}
+              <span className="block text-[13px] font-semibold">
+                {s.label} <span className="font-mono text-[11.5px] opacity-70">{counts[s.key]||0}</span>
+              </span>
+              <span className="block text-[11px] text-slate-500">{s.hi}</span>
+            </button>
+          );
+        })}
       </div>
 
       <div className="flex gap-2 mb-3 flex-wrap">
@@ -2703,7 +2968,7 @@ function TaskList({profile, doers, scope, toast}){
             <Ico d={I.calendar} className="w-9 h-9 mx-auto text-slate-300 mb-3" />
             <p className="font-semibold text-slate-700">Yahan koi task nahi</p>
             <p className="text-[13px] text-slate-500 mt-1">
-              {tasks.length ? "Filter ya search clear karke dekhein." : (scope==="mine" ? "Abhi koi task assign nahi hui." : "“Add Task” se nayi task banayein.")}
+              {tasks.length ? "Filter ya search clear karke dekhein." : (scope==="mine" ? "Abhi koi task assign nahi hui." : '"Add Task" se nayi task banayein.')}
             </p>
           </div>
         ) : shown.map(t => <TaskRow key={t.id} t={t} onOpen={setOpenTask} />)}
@@ -2720,7 +2985,7 @@ function TaskList({profile, doers, scope, toast}){
   );
 }
 
-function TasksPanel({profile, toast}){
+function TasksPanel({profile, toast, tabSeenMap, onTabSeenRefresh}){
   const [sub, setSub] = useState("mine");
   const [doers, setDoers] = useState([]);
 
@@ -2729,7 +2994,7 @@ function TasksPanel({profile, toast}){
       .then(({data}) => setDoers(data || []));
   },[]);
 
-  if (profile.role !== "Admin") return <TaskList profile={profile} doers={doers} scope="mine" toast={toast} />;
+  if (profile.role !== "Admin") return <TaskList profile={profile} doers={doers} scope="mine" toast={toast} tabSeenMap={tabSeenMap} onTabSeenRefresh={onTabSeenRefresh} />;
 
   return (
     <div>
@@ -2744,8 +3009,8 @@ function TasksPanel({profile, toast}){
         </button>
       </div>
       {sub === "mine"
-        ? <TaskList profile={profile} doers={doers} scope="mine" toast={toast} />
-        : <TaskList profile={profile} doers={doers} scope="all" toast={toast} />}
+        ? <TaskList profile={profile} doers={doers} scope="mine" toast={toast} tabSeenMap={tabSeenMap} onTabSeenRefresh={onTabSeenRefresh} />
+        : <TaskList profile={profile} doers={doers} scope="all" toast={toast} tabSeenMap={tabSeenMap} onTabSeenRefresh={onTabSeenRefresh} />}
     </div>
   );
 }
@@ -2843,6 +3108,10 @@ function ReminderWatcher({profile}){
         payload => {
           setQueue(q => q.some(x=>x.id===payload.new.id) ? q : [...q, payload.new]);
           notifyBrowser("⏰ Task Reminder!", payload.new.task_desc_snapshot, `task-${payload.new.task_id}`);
+          // Stamp received_at so Admin can see the ring reached the device
+          if (!payload.new.received_at) {
+            sb.from("task_reminders").update({ received_at: new Date().toISOString() }).eq("id", payload.new.id).then(()=>{});
+          }
         })
       .subscribe();
     return ()=>{ sb.removeChannel(channel); };
@@ -2920,6 +3189,7 @@ function App(){
         // Tear down EVERY view holding data. An open complaint modal that
         // survives sign-out would show the previous user's complaint to
         // whoever signs in next on the same shared factory phone.
+        stopPresence();
         setProfile(null); setRows([]); setMachines([]);
         setView("complaints"); setDetail(null); setShowNew(false); setLightbox(null);
         setToasts([]);   // old toasts can name the previous user's complaints
@@ -3021,12 +3291,55 @@ function App(){
     profile.role === "Host" ? `${(profile.host_types||[]).join(", ")} complaints` :
     "Sirf aapki complaints";
 
+  // ---- Tab badge system ----
+  const [tabSeenMap, reloadTabSeen] = useTabSeen(profile.id);
+
+  // ---- Presence heartbeat ----
+  useEffect(()=>{
+    startPresence(profile.id);
+    return ()=> stopPresence();
+  },[profile.id]);
+
+  // Mark main tab as seen on switch
+  const switchView = (key) => { setView(key); markTabSeen("main:" + key); reloadTabSeen(); };
+  useEffect(() => { markTabSeen("main:" + view); }, []); // eslint-disable-line
+
+  // Unseen counts for main nav tabs
+  const mainUnseenCounts = useMemo(()=>{
+    const c = {};
+    // Complaints: total unseen across all sub-tabs
+    const compLastSeen = Math.max(
+      ...(TABS.map(t => tabSeenMap["complaints:" + t.key] || "").filter(Boolean).map(d => new Date(d).getTime())),
+      tabSeenMap["main:complaints"] ? new Date(tabSeenMap["main:complaints"]).getTime() : 0
+    );
+    c.complaints = compLastSeen > 0 ? rows.filter(r => new Date(r.updated_at).getTime() > compLastSeen).length : rows.length;
+    // Notices: items updated after last notice tab seen
+    const notLastSeen = tabSeenMap["main:notices"];
+    c.notices = 0; // Will be computed when notices load — for now show dot if never seen
+    if (!notLastSeen) c.notices = -1; // flag: show dot without number
+    // Tasks: we don't have task data here but show dot if main:tasks never seen
+    const taskLastSeen = tabSeenMap["main:tasks"];
+    c.tasks = 0;
+    if (!taskLastSeen) c.tasks = -1;
+    return c;
+  },[rows, tabSeenMap]);
+
   const navItems = [
-    { key:"complaints", label:"Complaints" },
-    { key:"notices", label:"Notice Board" },
-    { key:"tasks", label:"Tasks" },
-    ...(profile.role === "Admin" ? [{ key:"machines", label:"Machines" }, { key:"users", label:"Users" }] : []),
+    { key:"complaints", label:"Complaints", hi:"शिकायत", color:"bg-amber-500/15 border-amber-500/60 text-amber-800", dot:"bg-amber-500" },
+    { key:"notices", label:"Notices", hi:"सूचना", color:"bg-blue-500/15 border-blue-500/60 text-blue-800", dot:"bg-blue-500" },
+    { key:"tasks", label:"Tasks", hi:"कार्य", color:"bg-teal-500/15 border-teal-500/60 text-teal-800", dot:"bg-teal-500" },
+    ...(profile.role === "Admin" ? [
+      { key:"machines", label:"Machines", hi:"मशीन", color:"bg-purple-500/15 border-purple-500/60 text-purple-800", dot:"bg-purple-500" },
+      { key:"users", label:"Users", hi:"यूजर", color:"bg-rose-500/15 border-rose-500/60 text-rose-800", dot:"bg-rose-500" },
+    ] : []),
   ];
+
+  // Swipe to switch main tabs
+  const mainNavKeys = navItems.map(n=>n.key);
+  const mainSwipeRef = useSwipe(
+    () => { const i = mainNavKeys.indexOf(view); if (i < mainNavKeys.length-1) switchView(mainNavKeys[i+1]); },
+    () => { const i = mainNavKeys.indexOf(view); if (i > 0) switchView(mainNavKeys[i-1]); }
+  );
 
   return (
     <div className="min-h-screen">
@@ -3037,23 +3350,37 @@ function App(){
             <h1 className="font-bold text-[15px] leading-tight truncate">Machine Complaint Register</h1>
             <p className="text-[11.5px] text-slate-500 truncate">{profile.name} · {profile.role} · {scopeLine}</p>
           </div>
-          <div className="flex rounded-lg border border-slate-200 overflow-hidden shrink-0 flex-wrap">
-            {navItems.map(n => (
-              <button key={n.key} onClick={()=>setView(n.key)}
-                className={`px-3 py-2 text-[12.5px] font-medium ${view===n.key?"bg-slate-100 text-slate-900":"text-slate-500 hover:text-slate-800"}`}>
-                {n.label}
-              </button>
-            ))}
-          </div>
           <Btn variant="primary" icon={I.plus} onClick={()=>setShowNew(true)} className="shrink-0">
             <span className="hidden sm:inline">New Complaint</span><span className="sm:hidden">New</span>
           </Btn>
           <BellButton toast={toast} />
           <Btn variant="ghost" icon={I.logout} onClick={()=>sb.auth.signOut()} aria-label="Logout" className="shrink-0" />
         </div>
+        {/* Nav tabs — colored, with red dot badges */}
+        <div className="max-w-6xl mx-auto px-4 pb-2">
+          <div className="flex gap-1 overflow-x-auto pb-0.5">
+            {navItems.map(n => {
+              const isActive = view === n.key;
+              const unseen = mainUnseenCounts[n.key] || 0;
+              return (
+                <button key={n.key} onClick={()=>switchView(n.key)}
+                  className={`shrink-0 rounded-xl px-3 sm:px-4 py-2 text-left transition-all border relative ${
+                    isActive ? n.color : "bg-white border-slate-200 hover:border-slate-300 text-slate-600"}`}>
+                  {(unseen > 0 || unseen === -1) && !isActive && (
+                    <span className={`absolute -top-1 -right-1 min-w-[16px] h-[16px] rounded-full ${n.dot} text-white text-[9px] font-bold flex items-center justify-center px-0.5 shadow-sm`}>
+                      {unseen === -1 ? "" : (unseen > 99 ? "99+" : unseen)}
+                    </span>
+                  )}
+                  <span className="block text-[12.5px] sm:text-[13px] font-semibold leading-tight">{n.label}</span>
+                  <span className="block text-[10px] sm:text-[11px] text-slate-500 leading-tight">{n.hi}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-5">
+      <main ref={mainSwipeRef} className="max-w-6xl mx-auto px-4 py-5">
         {view === "users" && profile.role === "Admin" ? (
           <AdminUsers profile={profile} toast={toast} callAdmin={callAdmin} />
         ) : view === "machines" && profile.role === "Admin" ? (
@@ -3061,12 +3388,13 @@ function App(){
         ) : view === "notices" ? (
           <NoticeBoard profile={profile} toast={toast} onView={setLightbox} />
         ) : view === "tasks" ? (
-          <TasksPanel profile={profile} toast={toast} />
+          <TasksPanel profile={profile} toast={toast} tabSeenMap={tabSeenMap} onTabSeenRefresh={reloadTabSeen} />
         ) : (
           <>
             <Stats rows={rows} profile={profile} />
             <ComplaintsView profile={profile} rows={rows} loading={loading}
-              onRefresh={()=>loadRows(true)} onOpen={setDetail} toast={toast} />
+              onRefresh={()=>loadRows(true)} onOpen={setDetail} toast={toast}
+              tabSeenMap={tabSeenMap} onTabSeenRefresh={reloadTabSeen} />
           </>
         )}
       </main>
