@@ -3159,6 +3159,13 @@ function ReminderWatcher({profile}){
 // ============================================================
 // 14. APP
 // ============================================================
+// Helper: compute nav keys for swipe (must be outside component for stable reference in setter callback)
+function _navKeys(profile) {
+  const keys = ["complaints","notices","tasks"];
+  if (profile?.role === "Admin") keys.push("machines","users");
+  return keys;
+}
+
 function App(){
   const [session, setSession] = useState(undefined);   // undefined = still checking
   const [profile, setProfile] = useState(null);
@@ -3270,6 +3277,45 @@ function App(){
     } catch(e){ return { ok:false, error: friendlyError(e) }; }
   },[]);
 
+  // ---- Tab badge system (MUST be before early returns — hooks can't be conditional) ----
+  const [tabSeenMap, reloadTabSeen] = useTabSeen(profile?.id);
+
+  // ---- Presence heartbeat ----
+  useEffect(()=>{
+    if (!profile?.id) return;
+    startPresence(profile.id);
+    return ()=> stopPresence();
+  },[profile?.id]);
+
+  // Mark main tab as seen on switch
+  const switchView = useCallback((key) => { setView(key); markTabSeen("main:" + key); reloadTabSeen(); },[reloadTabSeen]);
+  useEffect(() => { if (profile?.id) markTabSeen("main:" + view); }, [profile?.id]); // eslint-disable-line
+
+  // Unseen counts for main nav tabs
+  const mainUnseenCounts = useMemo(()=>{
+    const c = {};
+    // Complaints: total unseen across all sub-tabs
+    const compTimes = TABS.map(t => tabSeenMap["complaints:" + t.key] || "").filter(Boolean).map(d => new Date(d).getTime());
+    const mainCompTime = tabSeenMap["main:complaints"] ? new Date(tabSeenMap["main:complaints"]).getTime() : 0;
+    const compLastSeen = compTimes.length > 0 ? Math.max(...compTimes, mainCompTime) : mainCompTime;
+    c.complaints = compLastSeen > 0 ? rows.filter(r => new Date(r.updated_at).getTime() > compLastSeen).length : rows.length;
+    // Notices: items updated after last notice tab seen
+    const notLastSeen = tabSeenMap["main:notices"];
+    c.notices = 0;
+    if (!notLastSeen) c.notices = -1; // flag: show dot without number
+    // Tasks: show dot if main:tasks never seen
+    const taskLastSeen = tabSeenMap["main:tasks"];
+    c.tasks = 0;
+    if (!taskLastSeen) c.tasks = -1;
+    return c;
+  },[rows, tabSeenMap]);
+
+  // Swipe to switch main tabs (uses navItems computed below but stable keys)
+  const mainSwipeRef = useSwipe(
+    () => { setView(v => { const keys = _navKeys(profile); const i = keys.indexOf(v); return i < keys.length-1 ? (markTabSeen("main:"+keys[i+1]), reloadTabSeen(), keys[i+1]) : v; }); },
+    () => { setView(v => { const keys = _navKeys(profile); const i = keys.indexOf(v); return i > 0 ? (markTabSeen("main:"+keys[i-1]), reloadTabSeen(), keys[i-1]) : v; }); }
+  );
+
   // ---- render ----
   if (session === undefined) return null;      // boot overlay is still showing
   if (!session) return <><LoginScreen toast={toast} /><Toasts items={toasts} dismiss={dismiss} /></>;
@@ -3291,39 +3337,6 @@ function App(){
     profile.role === "Host" ? `${(profile.host_types||[]).join(", ")} complaints` :
     "Sirf aapki complaints";
 
-  // ---- Tab badge system ----
-  const [tabSeenMap, reloadTabSeen] = useTabSeen(profile.id);
-
-  // ---- Presence heartbeat ----
-  useEffect(()=>{
-    startPresence(profile.id);
-    return ()=> stopPresence();
-  },[profile.id]);
-
-  // Mark main tab as seen on switch
-  const switchView = (key) => { setView(key); markTabSeen("main:" + key); reloadTabSeen(); };
-  useEffect(() => { markTabSeen("main:" + view); }, []); // eslint-disable-line
-
-  // Unseen counts for main nav tabs
-  const mainUnseenCounts = useMemo(()=>{
-    const c = {};
-    // Complaints: total unseen across all sub-tabs
-    const compLastSeen = Math.max(
-      ...(TABS.map(t => tabSeenMap["complaints:" + t.key] || "").filter(Boolean).map(d => new Date(d).getTime())),
-      tabSeenMap["main:complaints"] ? new Date(tabSeenMap["main:complaints"]).getTime() : 0
-    );
-    c.complaints = compLastSeen > 0 ? rows.filter(r => new Date(r.updated_at).getTime() > compLastSeen).length : rows.length;
-    // Notices: items updated after last notice tab seen
-    const notLastSeen = tabSeenMap["main:notices"];
-    c.notices = 0; // Will be computed when notices load — for now show dot if never seen
-    if (!notLastSeen) c.notices = -1; // flag: show dot without number
-    // Tasks: we don't have task data here but show dot if main:tasks never seen
-    const taskLastSeen = tabSeenMap["main:tasks"];
-    c.tasks = 0;
-    if (!taskLastSeen) c.tasks = -1;
-    return c;
-  },[rows, tabSeenMap]);
-
   const navItems = [
     { key:"complaints", label:"Complaints", hi:"शिकायत", color:"bg-amber-500/15 border-amber-500/60 text-amber-800", dot:"bg-amber-500" },
     { key:"notices", label:"Notices", hi:"सूचना", color:"bg-blue-500/15 border-blue-500/60 text-blue-800", dot:"bg-blue-500" },
@@ -3333,13 +3346,6 @@ function App(){
       { key:"users", label:"Users", hi:"यूजर", color:"bg-rose-500/15 border-rose-500/60 text-rose-800", dot:"bg-rose-500" },
     ] : []),
   ];
-
-  // Swipe to switch main tabs
-  const mainNavKeys = navItems.map(n=>n.key);
-  const mainSwipeRef = useSwipe(
-    () => { const i = mainNavKeys.indexOf(view); if (i < mainNavKeys.length-1) switchView(mainNavKeys[i+1]); },
-    () => { const i = mainNavKeys.indexOf(view); if (i > 0) switchView(mainNavKeys[i-1]); }
-  );
 
   return (
     <div className="min-h-screen">
