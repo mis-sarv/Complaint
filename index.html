@@ -46,7 +46,9 @@
 const SUPABASE_URL  = "https://ywwrdopypbccwbnkzdiq.supabase.co";
 const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl3d3Jkb3B5cGJjY3dibmt6ZGlxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQxMTUyMzgsImV4cCI6MjA5OTY5MTIzOH0.tsc4oUXxOnfYq1g0PlpG0DhzJi-rhy8O4kfySyql-fg";
 const ADMIN_FN_URL  = SUPABASE_URL + "/functions/v1/admin-users";
+const PUSH_FN_URL   = SUPABASE_URL + "/functions/v1/send-push";
 const EMAIL_DOMAIN  = "@sarvindia.com";
+const VAPID_PUBLIC  = "BHpS4eQ196F4NO3sremWwvIMtvcUmiGzu4YEOOTok4GTnBJANLoswIoT8dAHhsx6xyxX1BeHgHJmM63rmPn_mFA";
 
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
   auth: { persistSession: true, autoRefreshToken: true, storageKey: "sarv-mis-auth" }
@@ -132,23 +134,34 @@ function friendlyError(e){
 // Three short beeps via the Web Audio API — no audio file, no CDN, so it
 // works even if the factory network is down (purely client-side synthesis).
 // Sound is a nice-to-have: any failure here must never break the UI.
+// Returns a stop() function. Alarm loops every 1.6s until stop() is called.
 function playAlarm(){
   try{
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return;
+    if (!Ctx) return ()=>{};
     const ctx = new Ctx();
-    const beep = (t, freq) => {
-      const osc = ctx.createOscillator(), gain = ctx.createGain();
-      osc.type = "square"; osc.frequency.value = freq;
-      osc.connect(gain); gain.connect(ctx.destination);
-      gain.gain.setValueAtTime(0.0001, ctx.currentTime + t);
-      gain.gain.exponentialRampToValueAtTime(0.32, ctx.currentTime + t + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t + 0.3);
-      osc.start(ctx.currentTime + t); osc.stop(ctx.currentTime + t + 0.32);
+    let stopped = false;
+    let timer = null;
+    const cycle = () => {
+      if (stopped || ctx.state === "closed") return;
+      const beep = (t, freq) => {
+        try{
+          const osc = ctx.createOscillator(), gain = ctx.createGain();
+          osc.type = "square"; osc.frequency.value = freq;
+          osc.connect(gain); gain.connect(ctx.destination);
+          gain.gain.setValueAtTime(0.0001, ctx.currentTime + t);
+          gain.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + t + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t + 0.3);
+          osc.start(ctx.currentTime + t); osc.stop(ctx.currentTime + t + 0.32);
+        }catch(e){}
+      };
+      beep(0, 880); beep(0.36, 660); beep(0.72, 880);
+      try{ if (navigator.vibrate) navigator.vibrate([300,150,300,150,300]); }catch(e){}
+      timer = setTimeout(cycle, 1600);
     };
-    beep(0, 880); beep(0.36, 660); beep(0.72, 880);
-    setTimeout(()=>{ ctx.close?.().catch(()=>{}); }, 1400);
-  } catch(e){ /* ignore — sound is best-effort */ }
+    cycle();
+    return () => { stopped = true; clearTimeout(timer); ctx.close?.().catch(()=>{}); };
+  } catch(e){ return ()=>{}; }
 }
 // Fire a native browser notification if the user already granted permission.
 // Requesting permission itself must happen from a real click (see BellButton) —
@@ -160,6 +173,90 @@ function notifyBrowser(title, body, tag){
     }
   } catch(e){ /* ignore */ }
   try{ if (navigator.vibrate) navigator.vibrate([300,150,300,150,300]); } catch(e){}
+}
+
+// ============================================================
+// 3b. WEB PUSH — Service Worker + Push Subscription
+// ============================================================
+// Convert VAPID base64url to Uint8Array (for applicationServerKey)
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+// Register the Service Worker (sw.js must sit next to index.html)
+async function registerSW() {
+  if (!('serviceWorker' in navigator)) return null;
+  try {
+    const swUrl = new URL('sw.js', window.location.href).href;
+    const reg = await navigator.serviceWorker.register(swUrl, { scope: './' });
+    // Wait for the SW to be active
+    if (reg.installing) {
+      await new Promise(resolve => {
+        reg.installing.addEventListener('statechange', function handler() {
+          if (this.state === 'activated') { this.removeEventListener('statechange', handler); resolve(); }
+        });
+      });
+    }
+    return reg;
+  } catch (e) { console.warn('SW registration failed:', e); return null; }
+}
+
+// Subscribe to Web Push and save subscription to Supabase
+async function subscribePush(userId) {
+  try {
+    if (!('PushManager' in window)) return;
+    const reg = await registerSW();
+    if (!reg) return;
+
+    // Request notification permission
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') return;
+
+    // Check existing subscription
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC),
+      });
+    }
+
+    // Extract keys and save to DB
+    const subJson = sub.toJSON();
+    const endpoint = subJson.endpoint;
+    const p256dh = subJson.keys?.p256dh || '';
+    const auth_key = subJson.keys?.auth || '';
+
+    if (!endpoint || !p256dh || !auth_key) return;
+
+    // Upsert — same user+endpoint just refreshes keys
+    await sb.from('push_subscriptions').upsert(
+      { user_id: userId, endpoint, p256dh, auth_key },
+      { onConflict: 'user_id,endpoint' }
+    );
+  } catch (e) { console.warn('Push subscription failed:', e); }
+}
+
+// Trigger server-side push for a specific user (called by Admin on Ring Alarm)
+async function sendPushToUser(targetUserId, taskDesc, message) {
+  try {
+    const { data: { session: s } } = await sb.auth.getSession();
+    if (!s) return;
+    await fetch(PUSH_FN_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${s.access_token}`,
+        'apikey': SUPABASE_ANON,
+      },
+      body: JSON.stringify({ target_user_id: targetUserId, title: '⏰ Task Reminder!', body: taskDesc, message }),
+    });
+  } catch (e) { console.warn('Push send failed:', e); }
 }
 
 // ============================================================
@@ -2268,8 +2365,10 @@ function TaskDetailModal({task, profile, doers, onClose, onSaved, toast}){
     const { error } = await sb.from("task_reminders").insert({ task_id: t.id, message: ringMsg.trim() || null });
     setRingBusy(false);
     if (error) return setErr(friendlyError(error));
+    // Also fire server-side Web Push (background notification even if browser is closed)
+    sendPushToUser(t.assigned_to, t.task_desc, ringMsg.trim() || null);
     setRingMsg(""); setRingSent(true);
-    toast("Reminder bhej diya.");
+    toast("Reminder bhej diya + Push notification bhi.");
     setTimeout(()=>setRingSent(false), 4000);
   };
 
@@ -2672,7 +2771,34 @@ function BellButton({toast}){
 function ReminderWatcher({profile}){
   const [queue, setQueue] = useState([]);
   const [busy, setBusy] = useState(false);
+  const stopAlarmRef = useRef(null);
+  const notifyTimerRef = useRef(null);
 
+  // Start / stop continuous alarm based on queue
+  useEffect(()=>{
+    if (queue.length > 0 && !stopAlarmRef.current) {
+      // Start looping alarm
+      stopAlarmRef.current = playAlarm();
+      // Also re-fire browser notification every 15s so it's hard to miss
+      const reNotify = () => {
+        const top = queue[0];
+        if (top) notifyBrowser("⏰ PENDING — Task Reminder!", top.task_desc_snapshot, `task-${top.task_id}`);
+      };
+      notifyTimerRef.current = setInterval(reNotify, 15000);
+    }
+    if (queue.length === 0 && stopAlarmRef.current) {
+      stopAlarmRef.current();
+      stopAlarmRef.current = null;
+      clearInterval(notifyTimerRef.current);
+      notifyTimerRef.current = null;
+    }
+    return () => {
+      if (stopAlarmRef.current) { stopAlarmRef.current(); stopAlarmRef.current = null; }
+      if (notifyTimerRef.current) { clearInterval(notifyTimerRef.current); notifyTimerRef.current = null; }
+    };
+  },[queue.length]);
+
+  // Realtime subscription
   useEffect(()=>{
     if (!profile?.id) return;
     const channel = sb.channel(`task_reminders_${profile.id}`)
@@ -2680,8 +2806,7 @@ function ReminderWatcher({profile}){
         {event:"INSERT", schema:"public", table:"task_reminders", filter:`assigned_to=eq.${profile.id}`},
         payload => {
           setQueue(q => q.some(x=>x.id===payload.new.id) ? q : [...q, payload.new]);
-          playAlarm();
-          notifyBrowser("⏰ Task Reminder", payload.new.task_desc_snapshot, `task-${payload.new.task_id}`);
+          notifyBrowser("⏰ Task Reminder!", payload.new.task_desc_snapshot, `task-${payload.new.task_id}`);
         })
       .subscribe();
     return ()=>{ sb.removeChannel(channel); };
@@ -2692,17 +2817,16 @@ function ReminderWatcher({profile}){
 
   const ack = async () => {
     setBusy(true);
-    const { error } = await sb.from("task_reminders").update({ acknowledged_at: new Date().toISOString() }).eq("id", r.id);
+    await sb.from("task_reminders").update({ acknowledged_at: new Date().toISOString() }).eq("id", r.id);
     setBusy(false);
-    // Whether it saved or not, don't trap the operator behind a dead alarm —
-    // drop it from the local queue either way; worst case it's still marked
-    // unacknowledged in the DB for the Admin to see.
+    // Drop from queue → alarm stops automatically via useEffect above
     setQueue(q => q.filter(x=>x.id!==r.id));
   };
 
   return (
     <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border-2 border-amber-400">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 border-2 border-amber-400 animate-pulse-border">
+        <style>{`@keyframes pulse-border{0%,100%{border-color:#fbbf24}50%{border-color:#ef4444}} .animate-pulse-border{animation:pulse-border 1s ease-in-out infinite}`}</style>
         <div className="flex items-center gap-2 mb-2.5">
           <div className="w-9 h-9 rounded-full bg-amber-500/15 text-amber-600 grid place-items-center shrink-0">
             <Ico d={I.bell} className="w-5 h-5" />
@@ -2711,13 +2835,16 @@ function ReminderWatcher({profile}){
             <h3 className="font-bold text-[15.5px] text-slate-900">Task Reminder</h3>
             <p className="text-[11px] text-slate-500">{r.sent_by_name} · {fmtDateTime(r.sent_at)}</p>
           </div>
+          <div className="ml-auto text-[11px] font-bold text-red-600 bg-red-100 px-2 py-1 rounded-full animate-pulse">
+            RINGING
+          </div>
         </div>
         <p className="text-[13.5px] text-slate-800 whitespace-pre-wrap leading-relaxed mb-1.5">{r.task_desc_snapshot}</p>
         <p className="text-[12px] text-slate-500 mb-2">Planned date: {fmtDate(r.planned_date_snapshot)}</p>
         {r.message ? <p className="text-[13px] text-teal-800 bg-teal-500/10 rounded-lg px-3 py-2 italic whitespace-pre-wrap mb-2">"{r.message}"</p> : null}
         {queue.length > 1 ? <p className="text-[11.5px] text-slate-400 mb-2">+{queue.length-1} aur reminder baaki</p> : null}
         <Btn variant="primary" className="w-full justify-center mt-2" onClick={ack} disabled={busy}>
-          {busy?<Spinner/>:null}OK, dekh liya
+          {busy?<Spinner/>:null}OK, dekh liya — Alarm band karo
         </Btn>
       </div>
     </div>
@@ -2779,6 +2906,12 @@ function App(){
       });
     return ()=>{ alive = false; };
   },[session]);
+
+  // ---- Web Push: register SW + subscribe on login ----
+  useEffect(()=>{
+    if (!profile?.id) return;
+    subscribePush(profile.id);
+  },[profile?.id]);
 
   // ---- data ----
   const loadRows = useCallback(async (showSpinner)=>{
