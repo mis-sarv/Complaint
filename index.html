@@ -131,19 +131,55 @@ function friendlyError(e){
   return m;
 }
 
+// ---- Global AudioContext — warmed on FIRST user interaction ----
+// Browsers block AudioContext.play() until the user has interacted with
+// the page (click / tap / keydown). We create the context early and
+// resume() it on the very first gesture so that later calls to
+// playAlarm() (which come from Realtime events, not user clicks) are
+// never silent.
+const _AudioCtx = window.AudioContext || window.webkitAudioContext;
+let _sharedAudioCtx = null;
+
+function _getAudioCtx() {
+  if (!_AudioCtx) return null;
+  if (!_sharedAudioCtx || _sharedAudioCtx.state === "closed") {
+    _sharedAudioCtx = new _AudioCtx();
+  }
+  // Always try to resume — no-op if already running
+  if (_sharedAudioCtx.state === "suspended") {
+    _sharedAudioCtx.resume().catch(() => {});
+  }
+  return _sharedAudioCtx;
+}
+
+// Warm the AudioContext on the earliest user gesture so that when a
+// Realtime reminder arrives later, sound plays immediately.
+(function warmAudio() {
+  const warm = () => {
+    _getAudioCtx();                               // create + resume
+    document.removeEventListener("click", warm, true);
+    document.removeEventListener("touchstart", warm, true);
+    document.removeEventListener("keydown", warm, true);
+  };
+  document.addEventListener("click", warm, true);
+  document.addEventListener("touchstart", warm, true);
+  document.addEventListener("keydown", warm, true);
+})();
+
 // Three short beeps via the Web Audio API — no audio file, no CDN, so it
 // works even if the factory network is down (purely client-side synthesis).
 // Sound is a nice-to-have: any failure here must never break the UI.
 // Returns a stop() function. Alarm loops every 1.6s until stop() is called.
 function playAlarm(){
   try{
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return ()=>{};
-    const ctx = new Ctx();
+    const ctx = _getAudioCtx();
+    if (!ctx) return ()=>{};
     let stopped = false;
     let timer = null;
     const cycle = () => {
       if (stopped || ctx.state === "closed") return;
+      // If still suspended (user never clicked anything), try again
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
       const beep = (t, freq) => {
         try{
           const osc = ctx.createOscillator(), gain = ctx.createGain();
@@ -160,7 +196,7 @@ function playAlarm(){
       timer = setTimeout(cycle, 1600);
     };
     cycle();
-    return () => { stopped = true; clearTimeout(timer); ctx.close?.().catch(()=>{}); };
+    return () => { stopped = true; clearTimeout(timer); };
   } catch(e){ return ()=>{}; }
 }
 // Fire a native browser notification if the user already granted permission.
@@ -2745,11 +2781,11 @@ function Stats({rows, profile}){
 }
 
 // ============================================================
-// 13B. TASK REMINDERS — Admin "ring alarm" pings a doer's device live.
-//      Sound + browser Notification only fire while this tab is open
-//      (a plain browser app can't wake a fully-closed device — see the
-//      note this ships with); acknowledging is mandatory so a missed
-//      alarm doesn't silently vanish.
+// 13B. TASK REMINDERS — Admin "ring alarm" pings a doer's device.
+//      In-tab: Sound + browser Notification fire via Realtime.
+//      Background: Server-side DB trigger sends Web Push even if
+//      the browser is fully closed — 100% delivery guarantee.
+//      Acknowledging is mandatory so nothing silently vanishes.
 // ============================================================
 function BellButton({toast}){
   const [perm, setPerm] = useState(()=> (window.Notification ? Notification.permission : "unsupported"));
