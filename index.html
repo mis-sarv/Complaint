@@ -429,6 +429,7 @@ const I = {
   megaphone:'<path d="m3 11 18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>',
   list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   scan:'<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/><path d="M7 8h2"/><path d="M7 16h2"/><path d="M15 8h2"/><path d="M15 16h2"/>',
+  userPlus:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/>',
 };
 
 // ============================================================
@@ -1272,58 +1273,75 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
 // ============================================================
 // 10. COMPLAINT DETAIL — the action panel changes with your role
 // ============================================================
-function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
+function ComplaintDetail({complaint, profile, hosts, onClose, onSaved, toast, onView}){
   const c = complaint;
-  const [photos, setPhotos] = useState(null);      // null = loading
+  const [photos, setPhotos] = useState(null);        // null = loading
+  const [proofPhotos, setProofPhotos] = useState(null); // host proof photos
   const [newPhotos, setNewPhotos] = useState([]);
-  const [sigImage, setSigImage] = useState(undefined);
+  const [newProofs, setNewProofs] = useState([]);     // host proof uploads
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const sigRef = useRef(null);
-  const [reSign, setReSign] = useState(false);
 
+  // Maintenance assign form state
+  const [selHost, setSelHost] = useState(c.host_user_id || "");
   const [eta, setEta] = useState(toLocalInput(c.expected_completion || new Date(Date.now()+4*3600e3).toISOString()));
   const [remarks, setRemarks] = useState(c.remarks || "");
-  const [sigName, setSigName] = useState(c.signature || profile.name);
+
+  // Host complete form state
+  const [compRemarks, setCompRemarks] = useState(c.completion_remarks || "");
+
+  // User feedback state
   const [fbRemarks, setFbRemarks] = useState("");
 
   const [confirmDel, setConfirmDel] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
 
+  // Role-based permissions
   const isOwner = c.raised_by_user_id === profile.id;
-  const isHostHere = (profile.role === "Admin") ||
-    ((profile.role === "Host" || profile.role === "Maintenance") &&
-      (profile.role === "Maintenance" || (profile.host_types||[]).includes(c.complaint_type)));
-  const canHostAct = isHostHere && profile.role !== "User";
+  const isMaint = profile.role === "Maintenance" || profile.role === "Admin";
+  const isAssignedHost = profile.role === "Host" && c.host_user_id === profile.id;
+  const canAssign = isMaint && c.status === "Pending";
+  const canComplete = (isAssignedHost || isMaint) && c.status === "In Progress";
+  const canFeedback = isOwner && c.status === "Completed";
   const canDelete = profile.role === "Admin" || (isOwner && c.status === "Pending");
 
-  // 🔵 Blue tick — when host/admin opens a complaint, mark it as seen
+  // Filter hosts by complaint_type
+  const filteredHosts = useMemo(() => {
+    if (!hosts?.length) return [];
+    return hosts.filter(h => (h.host_types || []).includes(c.complaint_type));
+  }, [hosts, c.complaint_type]);
+
+  // 🔵 Blue tick — when host opens assigned complaint, mark seen
   useEffect(() => {
-    if (canHostAct && !c.seen_by_host_at) markComplaintSeen(c.id);
+    if ((isAssignedHost || isMaint) && !c.seen_by_host_at) markComplaintSeen(c.id);
   }, [c.id]); // eslint-disable-line
 
+  // Load complaint photos + proof photos
   useEffect(()=>{
     let alive = true;
-    sb.from("complaint_photos").select("id,image_data").eq("complaint_id", c.id).order("created_at")
-      .then(({data,error}) => { if(alive) setPhotos(error ? [] : (data||[])); });
-    sb.from("machine_complaints").select("signature_image").eq("id", c.id).maybeSingle()
-      // Coalesce to null, never undefined — undefined is the "still loading"
-      // state, so a row that comes back without the column would spin forever.
-      .then(({data}) => { if(alive) setSigImage(data?.signature_image ?? null); });
+    sb.from("complaint_photos").select("id,image_data,photo_type").eq("complaint_id", c.id).order("created_at")
+      .then(({data,error}) => {
+        if (!alive) return;
+        const all = error ? [] : (data||[]);
+        setPhotos(all.filter(p => p.photo_type === "complaint"));
+        setProofPhotos(all.filter(p => p.photo_type === "proof"));
+      });
     return ()=>{ alive = false; };
   },[c.id]);
 
-  const savePhotos = async () => {
-    if (!newPhotos.length) return true;
+  const savePhotos = async (photoArr, type) => {
+    if (!photoArr.length) return true;
     const { error } = await sb.from("complaint_photos")
-      .insert(newPhotos.map(p => ({ complaint_id: c.id, image_data: p, mime:"image/jpeg" })));
+      .insert(photoArr.map(p => ({ complaint_id: c.id, image_data: p, mime:"image/jpeg", photo_type: type })));
     if (error){ toast("Photo upload nahi hui.", true); return false; }
     return true;
   };
 
   const run = async (patch, successMsg) => {
     setBusy(true); setErr("");
-    await savePhotos();
+    const ok1 = await savePhotos(newPhotos, "complaint");
+    const ok2 = await savePhotos(newProofs, "proof");
+    if (!ok1 || !ok2){ setBusy(false); return; }
     const { error } = await sb.from("machine_complaints").update(patch).eq("id", c.id);
     setBusy(false);
     if (error){ setErr(friendlyError(error)); return; }
@@ -1331,40 +1349,50 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
     onSaved();
   };
 
-  // --- Host: commit a completion date & time -> In Progress
-  const startWork = () => {
-    if (!eta) return setErr("Completion date & time chunein.");
+  // --- STEP 2: Maintenance assigns host + plan date -> In Progress
+  const assignHost = () => {
+    if (!selHost) return setErr("Host select karein.");
+    if (!eta) return setErr("Plan date & time chunein.");
     const when = new Date(eta);
     if (isNaN(when)) return setErr("Date & time sahi nahi hai.");
-    run({ status:"In Progress", expected_completion: when.toISOString(),
-          host_user_id: profile.id, remarks: remarks.trim() || null },
-        `${c.complaint_no} in-progress. User ko time dikh jayega.`);
+    const hostObj = hosts.find(h => h.id === selHost);
+    run({
+      status: "In Progress",
+      host_user_id: selHost,
+      host_name: hostObj?.name || "—",
+      assigned_by_user_id: profile.id,
+      assigned_by_name: profile.name,
+      assigned_at: new Date().toISOString(),
+      expected_completion: when.toISOString(),
+      remarks: remarks.trim() || null,
+    }, `${c.complaint_no} → ${hostObj?.name || "Host"} ko assign ho gayi.`);
   };
 
-  // --- Host: sign off -> Completed (waits for the raiser's confirmation)
+  // --- STEP 3: Host resolves with proof photos -> Completed
   const markCompleted = () => {
-    const drawn = sigRef.current?.hasInk() ? sigRef.current.toDataURL() : null;
-    const existing = isDataImage(sigImage) && !reSign ? sigImage : null;
-    if (!drawn && !existing) return setErr("Pad me signature banana zaroori hai.");
-    const patch = { status:"Completed", remarks: remarks.trim() || null, signature: sigName.trim() || profile.name };
-    if (drawn) patch.signature_image = drawn;
-    run(patch, `${c.complaint_no} completed. Ab user confirm karega.`);
+    if (newProofs.length === 0 && (!proofPhotos || proofPhotos.length === 0))
+      return setErr("Proof photo lagana zaroori hai.");
+    run({
+      status: "Completed",
+      completed_at: new Date().toISOString(),
+      completion_remarks: compRemarks.trim() || null,
+    }, `${c.complaint_no} completed. Ab user confirm karega.`);
   };
 
-  // --- Raiser: confirm the fix -> Closed, or kick it back
+  // --- STEP 4: User feedback -> Closed or kick back
   const confirmFixed = () =>
-    run({ status:"Closed", feedback_resolved:true, feedback_remarks: fbRemarks.trim() || null },
+    run({ status:"Closed", closed_at: new Date().toISOString(),
+          feedback_resolved:true, feedback_remarks: fbRemarks.trim() || null, feedback_at: new Date().toISOString() },
         `${c.complaint_no} close ho gayi. Shukriya!`);
   const notFixed = () =>
     run({ status:"In Progress", feedback_resolved:false, feedback_remarks: fbRemarks.trim() || null },
         `${c.complaint_no} wapas host ke paas bhej di.`);
 
-  // --- Owner (Pending only) or Admin (any status): delete permanently
+  // --- Delete
   const doDelete = async () => {
     setDelBusy(true);
     const { error } = await sb.from("machine_complaints").delete().eq("id", c.id);
-    setDelBusy(false);
-    setConfirmDel(false);
+    setDelBusy(false); setConfirmDel(false);
     if (error){ toast(friendlyError(error), true); return; }
     toast(`${c.complaint_no} delete ho gayi.`);
     onSaved();
@@ -1384,13 +1412,13 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
           {canDelete &&
             <Btn variant="danger" icon={I.x} className="mr-auto" onClick={()=>setConfirmDel(true)} disabled={busy}>Delete</Btn>}
           <Btn variant="outline" onClick={onClose}>Close</Btn>
-          {canHostAct && c.status === "Pending" &&
-            <Btn variant="primary" onClick={startWork} disabled={busy}>{busy?<Spinner/>:null}Save &amp; start work</Btn>}
-          {canHostAct && c.status === "In Progress" &&
-            <Btn variant="ok" onClick={markCompleted} disabled={busy}>{busy?<Spinner/>:null}Mark completed</Btn>}
-          {isOwner && c.status === "Completed" && <>
-            <Btn variant="outline" onClick={notFixed} disabled={busy}>No, abhi bhi problem hai</Btn>
-            <Btn variant="ok" onClick={confirmFixed} disabled={busy}>{busy?<Spinner/>:null}Yes, theek ho gaya</Btn>
+          {canAssign &&
+            <Btn variant="primary" onClick={assignHost} disabled={busy}>{busy?<Spinner/>:null}Assign &amp; Start</Btn>}
+          {canComplete &&
+            <Btn variant="ok" onClick={markCompleted} disabled={busy}>{busy?<Spinner/>:null}Mark Completed</Btn>}
+          {canFeedback && <>
+            <Btn variant="outline" onClick={notFixed} disabled={busy}>Nahi, abhi problem hai</Btn>
+            <Btn variant="ok" onClick={confirmFixed} disabled={busy}>{busy?<Spinner/>:null}Haan, theek ho gaya</Btn>
           </>}
         </>
       }>
@@ -1411,17 +1439,43 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
         <p className="rounded-lg bg-slate-100 px-3.5 py-3 text-[13.5px] whitespace-pre-wrap leading-relaxed">{c.problem_desc}</p>
       </div>
 
-      {/* Timeline of what has actually happened */}
+      {/* ---- Assigned host info card (visible to everyone when In Progress+) ---- */}
+      {c.host_name && c.status !== "Pending" && (
+        <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-3.5 mb-4">
+          <p className="text-[10.5px] uppercase tracking-wide text-teal-700 font-semibold mb-2">Assigned Host / ज़िम्मेदार व्यक्ति</p>
+          <div className="grid grid-cols-2 gap-3">
+            <Row k="Host Name" v={<span className="font-semibold text-teal-800">{c.host_name}</span>} />
+            {c.assigned_by_name && <Row k="Assigned by" v={c.assigned_by_name} />}
+            {c.expected_completion && <Row k="Plan Date" v={<span className="text-teal-700 font-semibold">{fmtDateTime(c.expected_completion)}</span>} />}
+            {c.assigned_at && <Row k="Assigned at" v={fmtDateTime(c.assigned_at)} />}
+          </div>
+          {c.remarks && (
+            <div className="mt-2.5 pt-2.5 border-t border-teal-500/20">
+              <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-1">Remarks</p>
+              <p className="text-[13px] text-slate-700 whitespace-pre-wrap">{c.remarks}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Timeline */}
       <div className="rounded-xl border border-slate-200 divide-y divide-slate-200 mb-4">
         <div className="flex items-center gap-2.5 px-3.5 py-2.5 text-[12.5px]">
           <Ico d={I.clipboard} className="w-4 h-4 text-slate-500 shrink-0" />
           <span className="text-slate-500">Logged</span>
           <span className="ml-auto text-slate-700">{fmtDateTime(c.created_at)}</span>
         </div>
+        {c.assigned_at && (
+          <div className="flex items-center gap-2.5 px-3.5 py-2.5 text-[12.5px]">
+            <Ico d={I.userPlus} className="w-4 h-4 text-teal-600 shrink-0" />
+            <span className="text-slate-500">Assigned to {c.host_name || "Host"}</span>
+            <span className="ml-auto text-teal-700 font-semibold">{fmtDateTime(c.assigned_at)}</span>
+          </div>
+        )}
         {c.expected_completion && (
           <div className="flex items-center gap-2.5 px-3.5 py-2.5 text-[12.5px]">
             <Ico d={I.clock} className="w-4 h-4 text-teal-600 shrink-0" />
-            <span className="text-slate-500">Completion promised</span>
+            <span className="text-slate-500">Completion target</span>
             <span className="ml-auto text-teal-700 font-semibold">{fmtDateTime(c.expected_completion)}</span>
           </div>
         )}
@@ -1441,22 +1495,23 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
         )}
       </div>
 
-      {c.remarks ? (
+      {/* Completion remarks from host */}
+      {c.completion_remarks && (
         <div className="mb-4">
-          <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-1.5">Host remarks</p>
-          <p className="text-[13.5px] text-slate-700 whitespace-pre-wrap">{c.remarks}</p>
+          <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-1.5">Host completion remarks</p>
+          <p className="text-[13.5px] text-slate-700 whitespace-pre-wrap">{c.completion_remarks}</p>
         </div>
-      ) : null}
-      {c.feedback_remarks ? (
+      )}
+      {c.feedback_remarks && (
         <div className="mb-4">
           <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-1.5">User feedback</p>
           <p className="text-[13.5px] text-slate-700 whitespace-pre-wrap">{c.feedback_remarks}</p>
         </div>
-      ) : null}
+      )}
 
-      {/* Photos */}
+      {/* Complaint Photos (from user) */}
       <div className="mb-4">
-        <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-2">Photos / फोटो</p>
+        <p className="text-[10.5px] uppercase tracking-wide text-slate-500 mb-2">Complaint Photos / शिकायत फोटो</p>
         {photos === null ? <Spinner className="w-4 h-4 text-slate-500" /> :
          photos.length === 0 ? <p className="text-[12.5px] text-slate-500 mb-2">Koi photo nahi.</p> :
          <div className="flex gap-2 flex-wrap mb-2">
@@ -1465,57 +1520,76 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
                   className="w-20 h-20 rounded-lg object-cover border border-slate-300 cursor-zoom-in" />
            ))}
          </div>}
-        {c.status !== "Closed" && (isOwner || canHostAct) && (
+        {isOwner && c.status === "Pending" && (
           <PhotoCapture photos={newPhotos} setPhotos={setNewPhotos} toast={toast} onView={onView} />
         )}
       </div>
 
-      {/* ---------- HOST ACTION PANEL ---------- */}
-      {canHostAct && c.status === "Pending" && (
+      {/* Proof Photos (from host) — visible after completion */}
+      {(proofPhotos?.length > 0 || newProofs.length > 0) && (
+        <div className="mb-4">
+          <p className="text-[10.5px] uppercase tracking-wide text-emerald-600 mb-2">Proof Photos / प्रमाण फोटो</p>
+          <div className="flex gap-2 flex-wrap mb-2">
+            {(proofPhotos||[]).map((p,i)=>(
+              <img key={p.id} src={p.image_data} alt={`Proof ${i+1}`} onClick={()=>onView(p.image_data)}
+                   className="w-20 h-20 rounded-lg object-cover border-2 border-emerald-300 cursor-zoom-in" />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ========== STEP 2: MAINTENANCE ASSIGN PANEL ========== */}
+      {canAssign && (
         <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-4 mt-5">
-          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">Start work / काम शुरू करें</p>
-          <Field label="Completion date &amp; time" hindi="कब तक ठीक होगा" required
-                 hint="Yeh time user ko In-progress tab me dikhega.">
+          <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold mb-3">
+            Assign Host / होस्ट को भेजें
+          </p>
+          <Field label="Select Host" hindi="होस्ट चुनें" required
+                 hint={`${c.complaint_type} type ke hosts dikhenge`}>
+            <select className={inputCls(false)} value={selHost} onChange={e=>setSelHost(e.target.value)}>
+              <option value="">— Host chunein —</option>
+              {filteredHosts.map(h => (
+                <option key={h.id} value={h.id}>{h.name} ({h.department})</option>
+              ))}
+              {filteredHosts.length === 0 && (
+                <option disabled>Koi host nahi mila is type ke liye</option>
+              )}
+            </select>
+          </Field>
+          <Field label="Plan Date &amp; Time" hindi="कब तक ठीक होगा" required
+                 hint="User ko In-progress me yeh date dikhega.">
             <input type="datetime-local" className={inputCls(false)} value={eta} onChange={e=>setEta(e.target.value)} />
           </Field>
-          <Field label="Remarks" hindi="टिप्पणी">
+          <Field label="Remarks / Instructions" hindi="निर्देश">
             <textarea className={inputCls(false)+" min-h-[64px] resize-y"} value={remarks}
-                      onChange={e=>setRemarks(e.target.value)} placeholder="Kya karna hai, spare chahiye…" />
+                      onChange={e=>setRemarks(e.target.value)} placeholder="Kya karna hai, spare chahiye, priority…" />
           </Field>
         </div>
       )}
 
-      {canHostAct && c.status === "In Progress" && (
+      {/* ========== STEP 3: HOST COMPLETE PANEL ========== */}
+      {canComplete && (
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 mt-5">
-          <p className="text-[11px] uppercase tracking-wide text-emerald-700 font-semibold mb-3">Complete the complaint / पूरा करें</p>
-          <Field label="Remarks" hindi="टिप्पणी">
-            <textarea className={inputCls(false)+" min-h-[64px] resize-y"} value={remarks}
-                      onChange={e=>setRemarks(e.target.value)} placeholder="Kya kiya gaya, kaunsa spare laga…" />
+          <p className="text-[11px] uppercase tracking-wide text-emerald-700 font-semibold mb-3">
+            Complete &amp; Upload Proof / पूरा करें
+          </p>
+          <Field label="Proof Photos" hindi="प्रमाण फोटो" required
+                 hint="Resolve ki photo lagao — Camera ya Gallery se">
+            <PhotoCapture photos={newProofs} setPhotos={setNewProofs} toast={toast} onView={onView} />
           </Field>
-          <Field label="Signed by" hindi="नाम">
-            <input className={inputCls(false)} value={sigName} onChange={e=>setSigName(e.target.value)} />
-          </Field>
-          <Field label="Signature" hindi="हस्ताक्षर" required>
-            {sigImage === undefined ? <Spinner className="w-4 h-4 text-slate-500" />
-              : (isDataImage(sigImage) && !reSign) ? (
-                <div>
-                  <div className="rounded-xl border border-slate-300 bg-white p-1.5">
-                    <img src={sigImage} alt="Saved signature" className="w-full max-h-[110px] object-contain" />
-                  </div>
-                  <Btn size="sm" variant="outline" icon={I.pen} className="mt-2" onClick={()=>setReSign(true)}>Sign again</Btn>
-                </div>
-              ) : <SignaturePad ref={sigRef} />}
+          <Field label="Completion Remarks" hindi="क्या किया गया">
+            <textarea className={inputCls(false)+" min-h-[64px] resize-y"} value={compRemarks}
+                      onChange={e=>setCompRemarks(e.target.value)} placeholder="Kya kiya gaya, kaunsa spare laga…" />
           </Field>
         </div>
       )}
 
-      {/* ---------- USER FEEDBACK PANEL ---------- */}
-      {isOwner && c.status === "Completed" && (
+      {/* ========== STEP 4: USER FEEDBACK PANEL ========== */}
+      {canFeedback && (
         <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4 mt-5">
           <p className="text-[13px] font-semibold text-violet-800 mb-1">Complaint resolved? / शिकायत ठीक हुई?</p>
           <p className="text-[12.5px] text-slate-500 mb-3">
-            Host ne complaint complete mark kar di hai. Machine sach me theek ho gayi?
-            &ldquo;Yes&rdquo; karne par complaint close ho jayegi.
+            {c.host_name || "Host"} ne complaint complete mark kar di hai. Machine sach me theek ho gayi?
           </p>
           <Field label="Your remarks" hindi="आपकी टिप्पणी">
             <textarea className={inputCls(false)+" min-h-[60px] resize-y"} value={fbRemarks}
@@ -1524,11 +1598,12 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
         </div>
       )}
 
-      {isOwner && c.status === "In Progress" && c.expected_completion && (
+      {/* User info panel — In Progress read-only view */}
+      {isOwner && c.status === "In Progress" && c.expected_completion && !isMaint && (
         <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-4 mt-5 flex items-start gap-3">
           <Ico d={I.clock} className="w-5 h-5 text-teal-700 mt-0.5 shrink-0" />
           <div>
-            <p className="text-[13px] font-semibold text-teal-800">Host ne time diya hai</p>
+            <p className="text-[13px] font-semibold text-teal-800">{c.host_name || "Host"} kaam kar raha hai</p>
             <p className="text-[13px] text-slate-700 mt-0.5">{fmtDateTime(c.expected_completion)} tak theek hone ki ummeed hai.</p>
           </div>
         </div>
@@ -1541,10 +1616,6 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
       ) : null}
 
       {confirmDel && (
-        // A plain inline overlay, not the shared <Modal> — nesting <Modal>
-        // inside <Modal> would double-toggle document.body's scroll lock,
-        // so cancelling this dialog would un-lock scroll while the
-        // complaint detail modal underneath is still open.
         <div className="fixed inset-0 z-[70] bg-slate-900/40 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4"
              onMouseDown={e=>{ if(e.target===e.currentTarget && !delBusy) setConfirmDel(false); }}>
           <div className="bg-white border border-slate-200 w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl shadow-2xl">
@@ -1554,8 +1625,7 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
             </div>
             <div className="px-5 py-4">
               <p className="text-[13.5px] text-slate-700">
-                <strong>{c.complaint_no}</strong> hamesha ke liye delete ho jayegi &mdash; iske saath sab photo aur
-                signature bhi mit jayenge. Yeh wapas nahi ho sakta.
+                <strong>{c.complaint_no}</strong> hamesha ke liye delete ho jayegi &mdash; iske saath sab photo bhi mit jayenge.
               </p>
             </div>
             <div className="px-5 py-3.5 border-t border-slate-200 flex gap-2 justify-end">
@@ -1573,9 +1643,15 @@ function ComplaintDetail({complaint, profile, onClose, onSaved, toast, onView}){
 // 11. COMPLAINTS VIEW (3 tabs)
 // ============================================================
 function ComplaintRow({c, profile, onOpen}){
+  // needsMe logic per workflow:
+  // Pending → Maintenance/Admin need to assign
+  // In Progress → assigned Host needs to complete
+  // Completed → complaint raiser needs to give feedback
+  const isMaint = profile.role === "Maintenance" || profile.role === "Admin";
   const needsMe =
-    (c.status === "Completed" && c.raised_by_user_id === profile.id) ||
-    (c.status === "Pending" && profile.role !== "User");
+    (c.status === "Pending" && isMaint) ||
+    (c.status === "In Progress" && profile.role === "Host" && c.host_user_id === profile.id) ||
+    (c.status === "Completed" && c.raised_by_user_id === profile.id);
   // Blue double-tick: complaint raiser sees it when host has opened the complaint
   const showBlueTick = c.seen_by_host_at && c.raised_by_user_id === profile.id;
   const borderColor = c.status==="Closed" ? "#10b981" : isDown(c) ? "#f43f5e" : c.status==="In Progress" ? "#14b8a6" : c.status==="Completed" ? "#a78bfa" : "#f59e0b";
@@ -1603,9 +1679,11 @@ function ComplaintRow({c, profile, onOpen}){
         <span className="truncate">{c.entered_by}</span>
         {c.photo_count > 0 && <span className="ml-auto shrink-0">📷 {c.photo_count}</span>}
       </div>
-      {c.status === "In Progress" && c.expected_completion ? (
-        <div className="mt-1.5 text-[10.5px] text-teal-700 font-medium">
-          Completion by: {fmtDateTime(c.expected_completion)}
+      {/* In Progress: show assigned host + plan date */}
+      {c.status === "In Progress" && (c.host_name || c.expected_completion) ? (
+        <div className="mt-1.5 flex items-center gap-2 text-[10.5px] text-teal-700 font-medium">
+          {c.host_name && <span>👷 {c.host_name}</span>}
+          {c.expected_completion && <span>· Plan: {fmtDateTime(c.expected_completion)}</span>}
         </div>
       ) : null}
     </button>
@@ -3385,6 +3463,7 @@ function App(){
   const [profileErr, setProfileErr] = useState("");
   const [rows, setRows] = useState([]);
   const [machines, setMachines] = useState([]);
+  const [hosts, setHosts] = useState([]);   // Host role profiles — for Maintenance assign flow
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("complaints");
   const [detail, setDetail] = useState(null);
@@ -3457,10 +3536,18 @@ function App(){
     if (!error) setMachines(data||[]);
   },[]);
 
+  const loadHosts = useCallback(async ()=>{
+    const { data, error } = await sb.from("profiles")
+      .select("id,name,mobile,department,host_types")
+      .eq("role","Host").eq("is_active",true).order("name");
+    if (!error) setHosts(data||[]);
+  },[]);
+
   useEffect(()=>{
     if (!profile) return;
     loadRows(true);
     loadMachines();
+    loadHosts();
     const iv = setInterval(()=>{
       if (document.visibilityState === "visible" && !detail && !showNew) loadRows(false);
     }, 60000);
@@ -3668,7 +3755,7 @@ function App(){
           onClose={()=>setShowNew(false)} onSaved={()=>{ setShowNew(false); loadRows(false); loadMachines(); }} />
       )}
       {detail && (
-        <ComplaintDetail complaint={detail} profile={profile} toast={toast} onView={setLightbox}
+        <ComplaintDetail complaint={detail} profile={profile} hosts={hosts} toast={toast} onView={setLightbox}
           onClose={()=>setDetail(null)} onSaved={()=>{ setDetail(null); loadRows(false); }} />
       )}
       {lightbox && <Lightbox src={lightbox} onClose={()=>setLightbox(null)} />}
