@@ -925,6 +925,26 @@ function LoginScreen({toast}){
     const email = makeEmail(sf.name);
 
     setSBusy(true); setSErr("");
+
+    // Pre-flight check — catches duplicate mobile/name BEFORE calling
+    // signUp(), so we never hit the opaque "Database error creating new
+    // user" GoTrue shows when its trigger blocks a duplicate.
+    const { data: avail, error: availErr } = await sb.rpc("check_signup_available", {
+      p_mobile: mob, p_name: sf.name.trim(),
+    });
+    if (!availErr && avail) {
+      if (avail.mobile_taken) {
+        setSBusy(false);
+        setSErr(`Yeh mobile number pehle se "${avail.mobile_owner}" ke naam par registered hai. Doosra number use karein ya login karein.`);
+        return;
+      }
+      if (avail.name_taken) {
+        setSBusy(false);
+        setSErr("Yeh naam pehle se registered hai. Apna poora naam likhein (middle name bhi) ya login karein.");
+        return;
+      }
+    }
+
     const { data, error } = await sb.auth.signUp({
       email, password,
       options: { data: {
@@ -1182,6 +1202,7 @@ function NewComplaintModal({profile, machines, onClose, onSaved, toast, onView})
       };
       const { error: mErr } = await sb.from("machine_list").insert(newM);
       if (!mErr) toast("Machine list me bhi add ho gayi — " + newM.machine_name);
+      else if (!/duplicate|unique/i.test(mErr.message || "")) console.warn("machine_list auto-add failed:", mErr.message);
     }
 
     setBusy(false);
@@ -1305,10 +1326,12 @@ function ComplaintDetail({complaint, profile, hosts, onClose, onSaved, toast, on
   const canFeedback = isOwner && c.status === "Completed";
   const canDelete = profile.role === "Admin" || (isOwner && c.status === "Pending");
 
-  // Filter hosts by complaint_type
+  // Filter hosts: matching complaint_type first, then others
   const filteredHosts = useMemo(() => {
-    if (!hosts?.length) return [];
-    return hosts.filter(h => (h.host_types || []).includes(c.complaint_type));
+    if (!hosts?.length) return { matched:[], others:[] };
+    const matched = hosts.filter(h => (h.host_types || []).includes(c.complaint_type));
+    const others  = hosts.filter(h => !(h.host_types || []).includes(c.complaint_type));
+    return { matched, others };
   }, [hosts, c.complaint_type]);
 
   // 🔵 Blue tick — when host opens assigned complaint, mark seen
@@ -1545,14 +1568,25 @@ function ComplaintDetail({complaint, profile, hosts, onClose, onSaved, toast, on
             Assign Host / होस्ट को भेजें
           </p>
           <Field label="Select Host" hindi="होस्ट चुनें" required
-                 hint={`${c.complaint_type} type ke hosts dikhenge`}>
+                 hint={`${c.complaint_type} type ke hosts pehle dikhenge`}>
             <select className={inputCls(false)} value={selHost} onChange={e=>setSelHost(e.target.value)}>
               <option value="">— Host chunein —</option>
-              {filteredHosts.map(h => (
-                <option key={h.id} value={h.id}>{h.name} ({h.department})</option>
-              ))}
-              {filteredHosts.length === 0 && (
-                <option disabled>Koi host nahi mila is type ke liye</option>
+              {filteredHosts.matched.length > 0 && (
+                <optgroup label={`✅ ${c.complaint_type} Hosts`}>
+                  {filteredHosts.matched.map(h => (
+                    <option key={h.id} value={h.id}>{h.name} · {h.department} · {h.mobile}</option>
+                  ))}
+                </optgroup>
+              )}
+              {filteredHosts.others.length > 0 && (
+                <optgroup label="👥 Other Hosts">
+                  {filteredHosts.others.map(h => (
+                    <option key={h.id} value={h.id}>{h.name} · {h.department} · {(h.host_types||[]).join(", ")}</option>
+                  ))}
+                </optgroup>
+              )}
+              {filteredHosts.matched.length === 0 && filteredHosts.others.length === 0 && (
+                <option disabled>Koi host nahi mila — Admin se host add karwayein</option>
               )}
             </select>
           </Field>
