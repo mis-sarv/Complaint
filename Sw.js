@@ -3,7 +3,7 @@
 // ============================================================
 // This SW handles:
 //   1. Push events  → show notification with sound + vibration
-//   2. Notification click → open / focus the app
+//   2. Notification click → open / focus the app 
 //   3. Notification close → (optional) analytics later
 // ============================================================
 
