@@ -1407,9 +1407,16 @@ function ComplaintDetail({complaint, profile, hosts, onClose, onSaved, toast, on
     run({ status:"Closed", closed_at: new Date().toISOString(),
           feedback_resolved:true, feedback_remarks: fbRemarks.trim() || null, feedback_at: new Date().toISOString() },
         `${c.complaint_no} close ho gayi. Shukriya!`);
-  const notFixed = () =>
-    run({ status:"In Progress", feedback_resolved:false, feedback_remarks: fbRemarks.trim() || null },
+  const notFixed = () => {
+    const now = new Date().toISOString();
+    run({ status:"In Progress", feedback_resolved:false, feedback_remarks: fbRemarks.trim() || null,
+          feedback_at: now,
+          // negative feedback -> host ka complete time aur again-feedback time alag columns me
+          rejected_completed_at: c.completed_at || null,
+          rejected_feedback_at: now,
+          reopen_count: (c.reopen_count || 0) + 1 },
         `${c.complaint_no} wapas host ke paas bhej di.`);
+  };
 
   // --- Delete
   const doDelete = async () => {
@@ -1507,6 +1514,22 @@ function ComplaintDetail({complaint, profile, hosts, onClose, onSaved, toast, on
             <Ico d={I.check} className="w-4 h-4 text-violet-600 shrink-0" />
             <span className="text-slate-500">Host completed</span>
             <span className="ml-auto text-slate-700">{fmtDateTime(c.completed_at)}</span>
+          </div>
+        )}
+        {c.rejected_completed_at && (
+          <div className="flex items-center gap-2.5 px-3.5 py-2.5 text-[12.5px]">
+            <Ico d={I.check} className="w-4 h-4 text-amber-600 shrink-0" />
+            <span className="text-slate-500">Host completed (rejected)</span>
+            <span className="ml-auto text-slate-700">{fmtDateTime(c.rejected_completed_at)}</span>
+          </div>
+        )}
+        {c.rejected_feedback_at && (
+          <div className="flex items-center gap-2.5 px-3.5 py-2.5 text-[12.5px]">
+            <Ico d={I.x} className="w-4 h-4 text-rose-600 shrink-0" />
+            <span className="text-slate-500">
+              Not fixed — user feedback{c.reopen_count > 1 ? ` (×${c.reopen_count})` : ""}
+            </span>
+            <span className="ml-auto text-rose-700 font-semibold">{fmtDateTime(c.rejected_feedback_at)}</span>
           </div>
         )}
         {c.closed_at && (
